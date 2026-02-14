@@ -612,7 +612,35 @@ def transcription_handler(request, file_path, metadata, user=None):
             % (info.language, info.language_probability)
         )
 
-        transcript = "".join([segment.text for segment in list(segments)])
+        # Filter out hallucinated segments based on confidence scores
+        # and known hallucination phrases (common in CJK Whisper output)
+        HALLUCINATION_BLOCKLIST = {
+            "谢谢观看", "感谢观看", "请订阅", "点赞", "转发", "关注",
+            "字幕由", "字幕提供", "字幕製作", "由Amara.org社区提供",
+            "Subscribe", "Thank you for watching", "Thanks for watching",
+            "Please subscribe", "Like and subscribe",
+            "Sous-titres réalisés", "Sous-titres par",
+            "ご視聴ありがとうございました",
+        }
+
+        filtered_segments = []
+        for segment in segments:
+            text = segment.text.strip()
+            # Skip segments with high no-speech probability
+            if segment.no_speech_prob > 0.9:
+                log.debug(f"Skipping segment (no_speech_prob={segment.no_speech_prob:.2f}): {text}")
+                continue
+            # Skip segments with very low confidence
+            if segment.avg_logprob < -1.0 and segment.no_speech_prob > 0.6:
+                log.debug(f"Skipping segment (low confidence avg_logprob={segment.avg_logprob:.2f}): {text}")
+                continue
+            # Skip known hallucination phrases
+            if any(phrase in text for phrase in HALLUCINATION_BLOCKLIST):
+                log.debug(f"Skipping hallucinated segment: {text}")
+                continue
+            filtered_segments.append(segment.text)
+
+        transcript = "".join(filtered_segments)
         data = {"text": transcript.strip()}
 
         # save the transcript to a json file
