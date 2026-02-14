@@ -3831,6 +3831,43 @@ WHISPER_MULTILINGUAL = os.getenv("WHISPER_MULTILINGUAL", "False").lower() == "tr
 
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "").lower() or None
 
+# Whisper hallucination filter rules
+# Each rule: {"pattern": str, "mode": "contains"|"exact"|"regex", "enabled": bool}
+_DEFAULT_HALLUCINATION_FILTERS = [
+    {"pattern": "谢谢观看", "mode": "contains", "enabled": True},
+    {"pattern": "感谢观看", "mode": "contains", "enabled": True},
+    {"pattern": "请订阅", "mode": "contains", "enabled": True},
+    {"pattern": "点赞", "mode": "contains", "enabled": True},
+    {"pattern": "转发", "mode": "contains", "enabled": True},
+    {"pattern": "关注", "mode": "contains", "enabled": True},
+    {"pattern": "字幕由", "mode": "contains", "enabled": True},
+    {"pattern": "字幕提供", "mode": "contains", "enabled": True},
+    {"pattern": "字幕製作", "mode": "contains", "enabled": True},
+    {"pattern": "由Amara.org社区提供", "mode": "contains", "enabled": True},
+    {"pattern": "Subscribe", "mode": "contains", "enabled": True},
+    {"pattern": "Thank you for watching", "mode": "contains", "enabled": True},
+    {"pattern": "Thanks for watching", "mode": "contains", "enabled": True},
+    {"pattern": "Please subscribe", "mode": "contains", "enabled": True},
+    {"pattern": "Like and subscribe", "mode": "contains", "enabled": True},
+    {"pattern": "Sous-titres réalisés", "mode": "contains", "enabled": True},
+    {"pattern": "Sous-titres par", "mode": "contains", "enabled": True},
+    {"pattern": "ご視聴ありがとうございました", "mode": "contains", "enabled": True},
+]
+try:
+    whisper_hallucination_filters = json.loads(
+        os.getenv("WHISPER_HALLUCINATION_FILTERS", "[]")
+    )
+    if not whisper_hallucination_filters:
+        whisper_hallucination_filters = _DEFAULT_HALLUCINATION_FILTERS
+except json.JSONDecodeError:
+    whisper_hallucination_filters = _DEFAULT_HALLUCINATION_FILTERS
+
+WHISPER_HALLUCINATION_FILTERS = PersistentConfig(
+    "WHISPER_HALLUCINATION_FILTERS",
+    "audio.stt.whisper_hallucination_filters",
+    whisper_hallucination_filters,
+)
+
 # Add Deepgram configuration
 DEEPGRAM_API_KEY = PersistentConfig(
     "DEEPGRAM_API_KEY",

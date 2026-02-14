@@ -54,6 +54,12 @@
 	let STT_MISTRAL_API_BASE_URL = '';
 	let STT_MISTRAL_USE_CHAT_COMPLETIONS = false;
 
+	let STT_WHISPER_HALLUCINATION_FILTERS: Array<{
+		pattern: string;
+		mode: string;
+		enabled: boolean;
+	}> = [];
+
 	let STT_WHISPER_MODEL_LOADING = false;
 
 	// eslint-disable-next-line no-undef
@@ -133,6 +139,7 @@
 				MODEL: STT_MODEL,
 				SUPPORTED_CONTENT_TYPES: STT_SUPPORTED_CONTENT_TYPES.split(','),
 				WHISPER_MODEL: STT_WHISPER_MODEL,
+				WHISPER_HALLUCINATION_FILTERS: STT_WHISPER_HALLUCINATION_FILTERS,
 				DEEPGRAM_API_KEY: STT_DEEPGRAM_API_KEY,
 				AZURE_API_KEY: STT_AZURE_API_KEY,
 				AZURE_REGION: STT_AZURE_REGION,
@@ -193,6 +200,7 @@
 			STT_MISTRAL_API_KEY = res.stt.MISTRAL_API_KEY;
 			STT_MISTRAL_API_BASE_URL = res.stt.MISTRAL_API_BASE_URL;
 			STT_MISTRAL_USE_CHAT_COMPLETIONS = res.stt.MISTRAL_USE_CHAT_COMPLETIONS;
+			STT_WHISPER_HALLUCINATION_FILTERS = res.stt.WHISPER_HALLUCINATION_FILTERS ?? [];
 		}
 
 		await getVoices();
@@ -493,6 +501,95 @@
 								)}
 							</a>
 						</div>
+					</div>
+
+					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
+
+					<!-- Whisper Hallucination Filters -->
+					<div>
+						<div class="flex items-center justify-between mb-1.5">
+							<div class="text-xs font-medium">{$i18n.t('Hallucination Filter Rules')}</div>
+							<button
+								type="button"
+								class="px-2 py-0.5 text-xs font-medium bg-gray-50 hover:bg-gray-200 text-gray-800 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-100 rounded-lg transition"
+								on:click={() => {
+									STT_WHISPER_HALLUCINATION_FILTERS = [
+										...STT_WHISPER_HALLUCINATION_FILTERS,
+										{ pattern: '', mode: 'contains', enabled: true }
+									];
+								}}
+							>
+								+ {$i18n.t('Add Rule')}
+							</button>
+						</div>
+
+						<div class="mt-1 mb-1 text-xs text-gray-400 dark:text-gray-500">
+							{$i18n.t(
+								'Filter out hallucinated transcription segments produced by Whisper on silence or noise. Supports contains, exact match, and regex modes.'
+							)}
+						</div>
+
+						{#if STT_WHISPER_HALLUCINATION_FILTERS.length > 0}
+							<div class="flex flex-col gap-1.5 mt-2">
+								{#each STT_WHISPER_HALLUCINATION_FILTERS as filter, idx}
+									<div class="flex items-center gap-2">
+										<!-- Enable toggle -->
+										<label class="relative inline-flex items-center cursor-pointer shrink-0">
+											<input
+												type="checkbox"
+												bind:checked={filter.enabled}
+												class="sr-only peer"
+											/>
+											<div
+												class="w-8 h-4 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[0px] after:left-[0px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"
+											></div>
+										</label>
+
+										<!-- Pattern input -->
+										<input
+											class="flex-1 rounded-lg py-1.5 px-3 text-xs bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+											bind:value={filter.pattern}
+											placeholder={$i18n.t('Pattern (e.g., 谢谢观看 or ^\\[.*\\]$)')}
+										/>
+
+										<!-- Mode selector -->
+										<select
+											class="dark:bg-gray-900 cursor-pointer rounded-sm px-1.5 py-1 text-xs bg-transparent outline-hidden shrink-0"
+											bind:value={filter.mode}
+										>
+											<option value="contains">{$i18n.t('Contains')}</option>
+											<option value="exact">{$i18n.t('Exact')}</option>
+											<option value="regex">{$i18n.t('Regex')}</option>
+										</select>
+
+										<!-- Delete button -->
+										<button
+											type="button"
+											class="p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition shrink-0"
+											on:click={() => {
+												STT_WHISPER_HALLUCINATION_FILTERS =
+													STT_WHISPER_HALLUCINATION_FILTERS.filter((_, i) => i !== idx);
+											}}
+										>
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												viewBox="0 0 16 16"
+												fill="currentColor"
+												class="w-4 h-4"
+											>
+												<path
+													d="M5.28 4.22a.75.75 0 0 0-1.06 1.06L6.94 8l-2.72 2.72a.75.75 0 1 0 1.06 1.06L8 9.06l2.72 2.72a.75.75 0 1 0 1.06-1.06L9.06 8l2.72-2.72a.75.75 0 0 0-1.06-1.06L8 6.94 5.28 4.22Z"
+												/>
+											</svg>
+										</button>
+									</div>
+								{/each}
+							</div>
+						{:else}
+							<div class="text-xs text-gray-400 dark:text-gray-500 mt-2 italic">
+								{$i18n.t('No filter rules configured. Click "Add Rule" to create one.')}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>

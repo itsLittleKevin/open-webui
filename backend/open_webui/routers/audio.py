@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 import html
 import base64
@@ -45,6 +46,7 @@ from open_webui.config import (
     CACHE_DIR,
     WHISPER_LANGUAGE,
     WHISPER_MULTILINGUAL,
+    WHISPER_HALLUCINATION_FILTERS,
     ELEVENLABS_API_BASE_URL,
 )
 
@@ -170,6 +172,12 @@ class TTSConfigForm(BaseModel):
     AZURE_SPEECH_OUTPUT_FORMAT: str
 
 
+class HallucinationFilterRule(BaseModel):
+    pattern: str
+    mode: str = "contains"  # "contains", "exact", or "regex"
+    enabled: bool = True
+
+
 class STTConfigForm(BaseModel):
     OPENAI_API_BASE_URL: str
     OPENAI_API_KEY: str
@@ -177,6 +185,7 @@ class STTConfigForm(BaseModel):
     MODEL: str
     SUPPORTED_CONTENT_TYPES: list[str] = []
     WHISPER_MODEL: str
+    WHISPER_HALLUCINATION_FILTERS: list[dict] = []
     DEEPGRAM_API_KEY: str
     AZURE_API_KEY: str
     AZURE_REGION: str
@@ -216,6 +225,7 @@ async def get_audio_config(request: Request, user=Depends(get_admin_user)):
             "MODEL": request.app.state.config.STT_MODEL,
             "SUPPORTED_CONTENT_TYPES": request.app.state.config.STT_SUPPORTED_CONTENT_TYPES,
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL,
+            "WHISPER_HALLUCINATION_FILTERS": request.app.state.config.WHISPER_HALLUCINATION_FILTERS,
             "DEEPGRAM_API_KEY": request.app.state.config.DEEPGRAM_API_KEY,
             "AZURE_API_KEY": request.app.state.config.AUDIO_STT_AZURE_API_KEY,
             "AZURE_REGION": request.app.state.config.AUDIO_STT_AZURE_REGION,
@@ -258,6 +268,7 @@ async def update_audio_config(
     )
 
     request.app.state.config.WHISPER_MODEL = form_data.stt.WHISPER_MODEL
+    request.app.state.config.WHISPER_HALLUCINATION_FILTERS = form_data.stt.WHISPER_HALLUCINATION_FILTERS
     request.app.state.config.DEEPGRAM_API_KEY = form_data.stt.DEEPGRAM_API_KEY
     request.app.state.config.AUDIO_STT_AZURE_API_KEY = form_data.stt.AZURE_API_KEY
     request.app.state.config.AUDIO_STT_AZURE_REGION = form_data.stt.AZURE_REGION
@@ -302,6 +313,7 @@ async def update_audio_config(
             "MODEL": request.app.state.config.STT_MODEL,
             "SUPPORTED_CONTENT_TYPES": request.app.state.config.STT_SUPPORTED_CONTENT_TYPES,
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL,
+            "WHISPER_HALLUCINATION_FILTERS": request.app.state.config.WHISPER_HALLUCINATION_FILTERS,
             "DEEPGRAM_API_KEY": request.app.state.config.DEEPGRAM_API_KEY,
             "AZURE_API_KEY": request.app.state.config.AUDIO_STT_AZURE_API_KEY,
             "AZURE_REGION": request.app.state.config.AUDIO_STT_AZURE_REGION,
@@ -613,15 +625,9 @@ def transcription_handler(request, file_path, metadata, user=None):
         )
 
         # Filter out hallucinated segments based on confidence scores
-        # and known hallucination phrases (common in CJK Whisper output)
-        HALLUCINATION_BLOCKLIST = {
-            "谢谢观看", "感谢观看", "请订阅", "点赞", "转发", "关注",
-            "字幕由", "字幕提供", "字幕製作", "由Amara.org社区提供",
-            "Subscribe", "Thank you for watching", "Thanks for watching",
-            "Please subscribe", "Like and subscribe",
-            "Sous-titres réalisés", "Sous-titres par",
-            "ご視聴ありがとうございました",
-        }
+        # and configurable filter rules from admin settings
+        hallucination_filters = request.app.state.config.WHISPER_HALLUCINATION_FILTERS or []
+        enabled_filters = [f for f in hallucination_filters if f.get("enabled", True)]
 
         filtered_segments = []
         for segment in segments:
@@ -634,9 +640,26 @@ def transcription_handler(request, file_path, metadata, user=None):
             if segment.avg_logprob < -1.0 and segment.no_speech_prob > 0.6:
                 log.debug(f"Skipping segment (low confidence avg_logprob={segment.avg_logprob:.2f}): {text}")
                 continue
-            # Skip known hallucination phrases
-            if any(phrase in text for phrase in HALLUCINATION_BLOCKLIST):
-                log.debug(f"Skipping hallucinated segment: {text}")
+            # Apply user-configured hallucination filters
+            blocked = False
+            for rule in enabled_filters:
+                pattern = rule.get("pattern", "")
+                mode = rule.get("mode", "contains")
+                if not pattern:
+                    continue
+                try:
+                    if mode == "exact" and text == pattern:
+                        blocked = True
+                    elif mode == "regex" and re.search(pattern, text):
+                        blocked = True
+                    elif mode == "contains" and pattern in text:
+                        blocked = True
+                except re.error:
+                    log.warning(f"Invalid regex pattern in hallucination filter: {pattern}")
+                if blocked:
+                    log.debug(f"Skipping hallucinated segment (rule: {mode} '{pattern}'): {text}")
+                    break
+            if blocked:
                 continue
             filtered_segments.append(segment.text)
 
