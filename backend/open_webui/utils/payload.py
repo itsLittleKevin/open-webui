@@ -192,8 +192,9 @@ def apply_model_params_to_body_ollama(params: dict, form_data: dict) -> dict:
 
     for key, value in ollama_root_params.items():
         if (param := params.get(key, None)) is not None:
-            # Copy the parameter to new name then delete it, to prevent Ollama warning of invalid option provided
-            form_data[key] = value(param)
+            # Don't overwrite if already set in the request (e.g. per-message thinking toggle)
+            if key not in form_data:
+                form_data[key] = value(param)
             del params[key]
 
     # Unlike OpenAI, Ollama does not support params directly in the body
@@ -357,6 +358,11 @@ def convert_payload_openai_to_ollama(openai_payload: dict) -> dict:
 
     if "metadata" in openai_payload:
         ollama_payload["metadata"] = openai_payload["metadata"]
+
+    # Preserve root-level Ollama params (e.g. think from the thinking toggle)
+    for key in ("think", "format", "keep_alive"):
+        if key in openai_payload and key not in ollama_payload:
+            ollama_payload[key] = openai_payload[key]
 
     if "response_format" in openai_payload:
         response_format = openai_payload["response_format"]

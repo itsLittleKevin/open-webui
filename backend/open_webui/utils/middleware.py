@@ -1860,6 +1860,11 @@ def apply_params_to_form_data(form_data, model):
 
     if model.get("owned_by") == "ollama":
         # Ollama specific parameters
+        # Extract root-level Ollama params that don't belong in "options"
+        ollama_root_keys = {"think", "format", "keep_alive"}
+        for key in ollama_root_keys:
+            if key in params and params[key] is not None:
+                form_data[key] = params.pop(key)
         form_data["options"] = params
     else:
         if isinstance(params, dict):
