@@ -95,6 +95,7 @@ from open_webui.routers import (
     users,
     utils,
     scim,
+    vmc,
 )
 
 from open_webui.routers.retrieval import (
@@ -207,6 +208,11 @@ from open_webui.config import (
     AUDIO_TTS_AZURE_SPEECH_REGION,
     AUDIO_TTS_AZURE_SPEECH_BASE_URL,
     AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
+    AUDIO_TTS_GPTSOVITS_API_BASE_URL,
+    AUDIO_TTS_GPTSOVITS_TEXT_LANG,
+    AUDIO_TTS_GPTSOVITS_PROMPT_LANG,
+    AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH,
+    AUDIO_TTS_GPTSOVITS_REF_TEXT,
     PLAYWRIGHT_WS_URL,
     PLAYWRIGHT_TIMEOUT,
     FIRECRAWL_API_BASE_URL,
@@ -590,6 +596,51 @@ https://github.com/open-webui/open-webui
 """)
 
 
+async def warmup_tts(app: FastAPI):
+    """Background watcher that keeps trying to warm up TTS until GPT-SoVITS is ready."""
+    if app.state.config.TTS_ENGINE != "gpt-sovits":
+        return
+
+    retry_delay = 5  # initial delay in seconds
+    max_delay = 30   # cap backoff
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            log.info(f"🔥 Warming up GPT-SoVITS TTS model (attempt {attempt})...")
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                payload = {
+                    "text": "hello",
+                    "text_lang": "en",
+                    "ref_audio_path": str(app.state.config.AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH) or "default",
+                    "prompt_text": str(app.state.config.AUDIO_TTS_GPTSOVITS_REF_TEXT) or "",
+                    "prompt_lang": str(app.state.config.AUDIO_TTS_GPTSOVITS_PROMPT_LANG) or "en",
+                    "streaming_mode": 0,
+                }
+                async with session.post(
+                    f"{app.state.config.AUDIO_TTS_GPTSOVITS_API_BASE_URL}/tts",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                ) as r:
+                    if r.status == 200:
+                        await r.read()
+                        log.info("✅ GPT-SoVITS TTS warmup complete (kernel compilation done)")
+                        app.state._tts_warmup_done = True
+                        return
+                    else:
+                        log.info(f"⏳ TTS returned status {r.status}, retrying in {retry_delay}s...")
+        except asyncio.CancelledError:
+            log.info("🛑 TTS warmup watcher cancelled")
+            return
+        except Exception as e:
+            log.info(f"⏳ TTS not ready yet, retrying in {retry_delay}s... ({e})")
+
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay + 5, max_delay)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Store reference to main event loop for sync->async calls (e.g., embedding generation)
@@ -657,7 +708,14 @@ async def lifespan(app: FastAPI):
             None,
         )
 
+    # Warm up TTS model in background - keeps retrying until GPT-SoVITS is ready
+    app.state._tts_warmup_task = asyncio.create_task(warmup_tts(app))
+
     yield
+
+    # Cancel TTS warmup watcher if still running
+    if hasattr(app.state, "_tts_warmup_task") and not app.state._tts_warmup_task.done():
+        app.state._tts_warmup_task.cancel()
 
     if hasattr(app.state, "redis_task_command_listener"):
         app.state.redis_task_command_listener.cancel()
@@ -1205,6 +1263,7 @@ app.state.config.STT_OPENAI_API_BASE_URL = AUDIO_STT_OPENAI_API_BASE_URL
 app.state.config.STT_OPENAI_API_KEY = AUDIO_STT_OPENAI_API_KEY
 
 app.state.config.WHISPER_MODEL = WHISPER_MODEL
+app.state.config.WHISPER_LANGUAGE = WHISPER_LANGUAGE
 app.state.config.WHISPER_HALLUCINATION_FILTERS = WHISPER_HALLUCINATION_FILTERS
 app.state.config.DEEPGRAM_API_KEY = DEEPGRAM_API_KEY
 
@@ -1236,9 +1295,19 @@ app.state.config.TTS_SPLIT_ON = AUDIO_TTS_SPLIT_ON
 app.state.config.TTS_AZURE_SPEECH_REGION = AUDIO_TTS_AZURE_SPEECH_REGION
 app.state.config.TTS_AZURE_SPEECH_BASE_URL = AUDIO_TTS_AZURE_SPEECH_BASE_URL
 app.state.config.TTS_AZURE_SPEECH_OUTPUT_FORMAT = AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT
+app.state.config.AUDIO_TTS_GPTSOVITS_API_BASE_URL = AUDIO_TTS_GPTSOVITS_API_BASE_URL
+app.state.config.AUDIO_TTS_GPTSOVITS_TEXT_LANG = AUDIO_TTS_GPTSOVITS_TEXT_LANG
+app.state.config.AUDIO_TTS_GPTSOVITS_PROMPT_LANG = AUDIO_TTS_GPTSOVITS_PROMPT_LANG
+app.state.config.AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH = AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH
+app.state.config.AUDIO_TTS_GPTSOVITS_REF_TEXT = AUDIO_TTS_GPTSOVITS_REF_TEXT
 
 
 app.state.faster_whisper_model = None
+app.state._whisper_model_name = None  # Track model name to avoid reloading if unchanged
+
+# TTS tracking (GPT-SoVITS service is HTTP-based, no local model reloading to worry about)
+app.state._tts_warmup_done = False
+
 app.state.speech_synthesiser = None
 app.state.speech_speaker_embeddings_dataset = None
 
@@ -1489,6 +1558,7 @@ app.include_router(
 )
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["analytics"])
 app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
+app.include_router(vmc.router, prefix="/api/v1/vmc", tags=["vmc"])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:

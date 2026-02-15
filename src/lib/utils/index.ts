@@ -832,6 +832,7 @@ export const removeFormattings = (str: string) => {
 			.replace(/^\s*[-*+]\s+/gm, '') // Lists
 			.replace(/^\s*(?:\d+\.)\s+/gm, '') // Numbered lists
 			.replace(/^\s*>[> ]*/gm, '') // Blockquotes
+			.replace(/^\s*---+\s*$/gm, '') // Horizontal rules
 			.replace(/^\s*:\s+/gm, '') // Definition lists
 
 			// Cleanup
@@ -901,7 +902,8 @@ export const extractSentences = (text: string) => {
 	});
 
 	// Split the modified text into sentences based on common punctuation marks or newlines, avoiding these blocks
-	let sentences = text.split(/(?<=[.!?])\s+|\n+/);
+	// Include Chinese/CJK punctuation (。！？；) which may not be followed by whitespace
+	let sentences = text.split(/(?<=[.!?])\ +|(?<=[。！？；])\ *|\n+/);
 
 	// Restore code blocks and process sentences
 	sentences = sentences.map((sentence) => {
@@ -935,15 +937,27 @@ export const extractParagraphsForAudio = (text: string) => {
 	return paragraphs.map(cleanText).filter(Boolean);
 };
 
+// Detect whether a string is predominantly CJK (Chinese/Japanese/Korean)
+const isCJK = (text: string): boolean => {
+	const cjkChars = text.match(/[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]/g);
+	return !!cjkChars && cjkChars.length > text.length * 0.3;
+};
+
 export const extractSentencesForAudio = (text: string) => {
 	return extractSentences(text).reduce((mergedTexts, currentText) => {
 		const lastIndex = mergedTexts.length - 1;
 		if (lastIndex >= 0) {
 			const previousText = mergedTexts[lastIndex];
-			const wordCount = previousText.split(/\s+/).length;
 			const charCount = previousText.length;
-			if (wordCount < 4 || charCount < 50) {
-				mergedTexts[lastIndex] = previousText + ' ' + currentText;
+			// For CJK text, use character count only (no word-splitting by spaces)
+			// For non-CJK, use word count as before
+			const tooShort = isCJK(previousText)
+				? charCount < 10
+				: previousText.split(/\s+/).length < 4 || charCount < 50;
+			if (tooShort) {
+				// Don't insert space between CJK characters
+				const separator = isCJK(previousText) || isCJK(currentText) ? '' : ' ';
+				mergedTexts[lastIndex] = previousText + separator + currentText;
 			} else {
 				mergedTexts.push(currentText);
 			}

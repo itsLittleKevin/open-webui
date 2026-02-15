@@ -414,23 +414,33 @@
 				const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
 
 				if (audioElement) {
+					if (!audio.src) {
+						console.warn('[call-overlay] Audio has no src, skipping');
+						resolve(null);
+						return;
+					}
 					audioElement.src = audio.src;
-					audioElement.muted = true;
+					audioElement.muted = false;
 					audioElement.playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
 
-					audioElement
-						.play()
-						.then(() => {
-							audioElement.muted = false;
-						})
-						.catch((error) => {
-							console.error(error);
-						});
+					audioElement.onerror = (e) => {
+						console.error('[call-overlay] Audio playback error:', e);
+						resolve(null);
+					};
 
 					audioElement.onended = async (e) => {
 						await new Promise((r) => setTimeout(r, 100));
 						resolve(e);
 					};
+
+					audioElement
+						.play()
+						.catch((error) => {
+							console.error(error);
+							resolve(null);
+						});
+				} else {
+					resolve(null);
 				}
 			});
 		} else {
@@ -601,8 +611,12 @@
 			try {
 				if (messages[id] === undefined) {
 					messages[id] = [content];
-				} else {
+				} else if (!messages[id].includes(content)) {
+					// Deduplicate: skip if this sentence is already queued
 					messages[id].push(content);
+				} else {
+					console.log(`[call-overlay] Skipping duplicate sentence: ${content.substring(0, 40)}`);
+					return;
 				}
 
 				console.log(content);

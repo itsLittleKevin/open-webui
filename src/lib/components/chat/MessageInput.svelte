@@ -60,6 +60,8 @@
 	import { createNoteHandler } from '../notes/utils';
 	import { getSuggestionRenderer } from '../common/RichTextInput/suggestions';
 
+	import LightBulb from '../icons/LightBulb.svelte';
+
 	import InputMenu from './MessageInput/InputMenu.svelte';
 	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
 	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
@@ -121,6 +123,7 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
+	export let thinkingEnabled = false;
 
 	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
 	export let onQueueSendNow: (id: string) => void = () => {};
@@ -398,6 +401,7 @@
 
 	let loaded = false;
 	let recording = false;
+	export let isVoiceInput = false;
 
 	let isComposing = false;
 	// Safari has a bug where compositionend is not triggered correctly #16615
@@ -1114,6 +1118,7 @@
 								const { text, filename } = data;
 
 								recording = false;
+								isVoiceInput = true;
 
 								await tick();
 								await insertTextAtCursor(`${text}`);
@@ -1130,6 +1135,7 @@
 						class="w-full flex flex-col gap-1.5 {recording ? 'hidden' : ''}"
 						on:submit|preventDefault={() => {
 							// check if selectedModels support image input
+							isVoiceInput = false;
 							dispatch('submit', prompt);
 						}}
 					>
@@ -1769,6 +1775,20 @@
 												</button>
 											</Tooltip>
 										{/if}
+
+										<Tooltip content={thinkingEnabled ? $i18n.t('Disable Thinking') : $i18n.t('Enable Thinking')} placement="top">
+											<button
+												on:click|preventDefault={() => (thinkingEnabled = !thinkingEnabled)}
+												type="button"
+												class="p-1.5 self-center rounded-full transition-colors duration-300 focus:outline-hidden {thinkingEnabled
+													? 'text-amber-500 dark:text-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-400/10 dark:hover:bg-amber-600/10'
+													: 'text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800'}"
+												aria-label={thinkingEnabled ? 'Disable Thinking' : 'Enable Thinking'}
+												aria-pressed={thinkingEnabled}
+											>
+												<LightBulb className="size-5" strokeWidth="1.75" />
+											</button>
+										</Tooltip>
 
 										{#if (!history?.currentId || history.messages[history.currentId]?.done == true) && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true))}
 											<!-- {$i18n.t('Record voice')} -->

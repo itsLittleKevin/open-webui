@@ -6,6 +6,7 @@ import re
 import uuid
 import html
 import base64
+from pathlib import Path
 from functools import lru_cache
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
@@ -30,7 +31,8 @@ from fastapi import (
     APIRouter,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 
@@ -132,22 +134,51 @@ def set_faster_whisper_model(model: str, auto_update: bool = False):
     if model:
         from faster_whisper import WhisperModel
 
+        log.info(f"🎤 Loading Whisper model: {model}")
+        
+        # Determine device: use CUDA if available (check both PyTorch and CTranslate2), fallback to CPU
+        device = "cpu"
+        if DEVICE_TYPE == "cuda":
+            device = "cuda"
+        else:
+            # CTranslate2 (used by faster-whisper) may have CUDA even if PyTorch doesn't
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() > 0:
+                    device = "cuda"
+                    log.info("🎤 CUDA detected via CTranslate2 (PyTorch reported CPU)")
+            except Exception:
+                pass
+        
+        # For int8 compute types, warn if device is CPU
+        if device == "cpu" and WHISPER_COMPUTE_TYPE and "int8" in WHISPER_COMPUTE_TYPE:
+            log.warning(f"⚠️ int8 compute type requires GPU, but device is CPU. Falling back to float32.")
+            compute_type = "float32"
+        else:
+            compute_type = WHISPER_COMPUTE_TYPE
+        
         faster_whisper_kwargs = {
             "model_size_or_path": model,
-            "device": DEVICE_TYPE if DEVICE_TYPE and DEVICE_TYPE == "cuda" else "cpu",
-            "compute_type": WHISPER_COMPUTE_TYPE,
+            "device": device,
+            "compute_type": compute_type,
             "download_root": WHISPER_MODEL_DIR,
             "local_files_only": not auto_update,
         }
 
+        log.info(f"🎤 Device: {device}, Compute type: {compute_type}")
+
         try:
             whisper_model = WhisperModel(**faster_whisper_kwargs)
-        except Exception:
+            log.info(f"✅ Whisper model loaded successfully: {model}")
+        except Exception as e:
             log.warning(
-                "WhisperModel initialization failed, attempting download with local_files_only=False"
+                f"WhisperModel initialization failed for {model}, attempting download with local_files_only=False: {e}"
             )
             faster_whisper_kwargs["local_files_only"] = False
             whisper_model = WhisperModel(**faster_whisper_kwargs)
+            log.info(f"✅ Whisper model loaded after download: {model}")
+    else:
+        log.warning("❌ No Whisper model specified (empty string)")
     return whisper_model
 
 
@@ -170,6 +201,9 @@ class TTSConfigForm(BaseModel):
     AZURE_SPEECH_REGION: str
     AZURE_SPEECH_BASE_URL: str
     AZURE_SPEECH_OUTPUT_FORMAT: str
+    GPTSOVITS_API_BASE_URL: str
+    GPTSOVITS_REF_AUDIO_PATH: str = ""
+    GPTSOVITS_REF_TEXT: str = ""
 
 
 class HallucinationFilterRule(BaseModel):
@@ -185,6 +219,7 @@ class STTConfigForm(BaseModel):
     MODEL: str
     SUPPORTED_CONTENT_TYPES: list[str] = []
     WHISPER_MODEL: str
+    WHISPER_LANGUAGE: str
     WHISPER_HALLUCINATION_FILTERS: list[dict] = []
     DEEPGRAM_API_KEY: str
     AZURE_API_KEY: str
@@ -217,6 +252,9 @@ async def get_audio_config(request: Request, user=Depends(get_admin_user)):
             "AZURE_SPEECH_REGION": request.app.state.config.TTS_AZURE_SPEECH_REGION,
             "AZURE_SPEECH_BASE_URL": request.app.state.config.TTS_AZURE_SPEECH_BASE_URL,
             "AZURE_SPEECH_OUTPUT_FORMAT": request.app.state.config.TTS_AZURE_SPEECH_OUTPUT_FORMAT,
+            "GPTSOVITS_API_BASE_URL": request.app.state.config.AUDIO_TTS_GPTSOVITS_API_BASE_URL,
+            "GPTSOVITS_REF_AUDIO_PATH": request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH,
+            "GPTSOVITS_REF_TEXT": request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_TEXT,
         },
         "stt": {
             "OPENAI_API_BASE_URL": request.app.state.config.STT_OPENAI_API_BASE_URL,
@@ -225,6 +263,7 @@ async def get_audio_config(request: Request, user=Depends(get_admin_user)):
             "MODEL": request.app.state.config.STT_MODEL,
             "SUPPORTED_CONTENT_TYPES": request.app.state.config.STT_SUPPORTED_CONTENT_TYPES,
             "WHISPER_MODEL": request.app.state.config.WHISPER_MODEL,
+            "WHISPER_LANGUAGE": request.app.state.config.WHISPER_LANGUAGE,
             "WHISPER_HALLUCINATION_FILTERS": request.app.state.config.WHISPER_HALLUCINATION_FILTERS,
             "DEEPGRAM_API_KEY": request.app.state.config.DEEPGRAM_API_KEY,
             "AZURE_API_KEY": request.app.state.config.AUDIO_STT_AZURE_API_KEY,
@@ -258,6 +297,15 @@ async def update_audio_config(
     request.app.state.config.TTS_AZURE_SPEECH_OUTPUT_FORMAT = (
         form_data.tts.AZURE_SPEECH_OUTPUT_FORMAT
     )
+    request.app.state.config.AUDIO_TTS_GPTSOVITS_API_BASE_URL = (
+        form_data.tts.GPTSOVITS_API_BASE_URL
+    )
+    request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH = (
+        form_data.tts.GPTSOVITS_REF_AUDIO_PATH
+    )
+    request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_TEXT = (
+        form_data.tts.GPTSOVITS_REF_TEXT
+    )
 
     request.app.state.config.STT_OPENAI_API_BASE_URL = form_data.stt.OPENAI_API_BASE_URL
     request.app.state.config.STT_OPENAI_API_KEY = form_data.stt.OPENAI_API_KEY
@@ -268,6 +316,7 @@ async def update_audio_config(
     )
 
     request.app.state.config.WHISPER_MODEL = form_data.stt.WHISPER_MODEL
+    request.app.state.config.WHISPER_LANGUAGE = form_data.stt.WHISPER_LANGUAGE
     request.app.state.config.WHISPER_HALLUCINATION_FILTERS = form_data.stt.WHISPER_HALLUCINATION_FILTERS
     request.app.state.config.DEEPGRAM_API_KEY = form_data.stt.DEEPGRAM_API_KEY
     request.app.state.config.AUDIO_STT_AZURE_API_KEY = form_data.stt.AZURE_API_KEY
@@ -285,12 +334,21 @@ async def update_audio_config(
         form_data.stt.MISTRAL_USE_CHAT_COMPLETIONS
     )
 
+    # Only reload Whisper model if the model name actually changed
     if request.app.state.config.STT_ENGINE == "":
-        request.app.state.faster_whisper_model = set_faster_whisper_model(
-            form_data.stt.WHISPER_MODEL, WHISPER_MODEL_AUTO_UPDATE
-        )
+        old_model = getattr(request.app.state, "_whisper_model_name", None)
+        new_model = form_data.stt.WHISPER_MODEL
+        if old_model != new_model:
+            log.info(f"🔄 Whisper model changed from {old_model} to {new_model}, reloading...")
+            request.app.state.faster_whisper_model = set_faster_whisper_model(
+                new_model, WHISPER_MODEL_AUTO_UPDATE
+            )
+            request.app.state._whisper_model_name = new_model
+        else:
+            log.info(f"✅ Whisper model unchanged ({new_model}), keeping cached model")
     else:
         request.app.state.faster_whisper_model = None
+        request.app.state._whisper_model_name = None
 
     return {
         "tts": {
@@ -305,6 +363,9 @@ async def update_audio_config(
             "AZURE_SPEECH_REGION": request.app.state.config.TTS_AZURE_SPEECH_REGION,
             "AZURE_SPEECH_BASE_URL": request.app.state.config.TTS_AZURE_SPEECH_BASE_URL,
             "AZURE_SPEECH_OUTPUT_FORMAT": request.app.state.config.TTS_AZURE_SPEECH_OUTPUT_FORMAT,
+            "GPTSOVITS_API_BASE_URL": request.app.state.config.AUDIO_TTS_GPTSOVITS_API_BASE_URL,
+            "GPTSOVITS_REF_AUDIO_PATH": request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH,
+            "GPTSOVITS_REF_TEXT": request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_TEXT,
         },
         "stt": {
             "OPENAI_API_BASE_URL": request.app.state.config.STT_OPENAI_API_BASE_URL,
@@ -342,6 +403,22 @@ def load_speech_pipeline(request):
         )
 
 
+async def _route_file_to_cable(file_path: Path):
+    """Send audio file to VB-Audio Cable for VRM lip sync (runs after response)."""
+    try:
+        async with aiofiles.open(file_path, "rb") as f:
+            audio_data = await f.read()
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                "http://localhost:8765/play-bytes",
+                data=audio_data,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+    except Exception:
+        log.warning("Audio router unavailable — VRM lip sync skipped")
+
+
 @router.post("/speech")
 async def speech(request: Request, user=Depends(get_verified_user)):
     if request.app.state.config.TTS_ENGINE == "":
@@ -370,7 +447,10 @@ async def speech(request: Request, user=Depends(get_verified_user)):
 
     # Check if the file already exists in the cache
     if file_path.is_file():
-        return FileResponse(file_path)
+        return FileResponse(
+            file_path,
+            background=BackgroundTask(_route_file_to_cable, file_path),
+        )
 
     payload = None
     try:
@@ -494,6 +574,93 @@ async def speech(request: Request, user=Depends(get_verified_user)):
                 detail=detail if detail else "Open WebUI: Server Connection Error",
             )
 
+    elif request.app.state.config.TTS_ENGINE == "gpt-sovits":
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception as e:
+            log.exception(e)
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+        # GPT-SoVITS outputs WAV — use correct extension for cache
+        file_path = SPEECH_CACHE_DIR.joinpath(f"{name}.wav")
+
+        if file_path.is_file():
+            return FileResponse(
+                file_path,
+                media_type="audio/wav",
+                background=BackgroundTask(_route_file_to_cable, file_path),
+            )
+
+        try:
+            ref_audio_path = (
+                payload.get("ref_audio_path", "")
+                or str(request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH or "")
+            )
+            ref_text = (
+                payload.get("prompt_text", "")
+                or str(request.app.state.config.AUDIO_TTS_GPTSOVITS_REF_TEXT or "")
+            )
+            gpt_sovits_payload = {
+                "text": payload.get("input", ""),
+                "text_lang": payload.get(
+                    "language",
+                    str(request.app.state.config.AUDIO_TTS_GPTSOVITS_TEXT_LANG or "en"),
+                ),
+                "ref_audio_path": ref_audio_path,
+                "prompt_text": ref_text,
+                "prompt_lang": payload.get(
+                    "prompt_language",
+                    str(request.app.state.config.AUDIO_TTS_GPTSOVITS_PROMPT_LANG or "en"),
+                ),
+                "streaming_mode": False,
+                "text_split_method": "cut0",
+                "media_type": "wav",
+                "speed_factor": 1.0,
+            }
+
+            base_url = str(request.app.state.config.AUDIO_TTS_GPTSOVITS_API_BASE_URL)
+            timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+
+            async with aiohttp.ClientSession(
+                timeout=timeout, trust_env=True
+            ) as session:
+                async with session.post(
+                    f"{base_url}/tts",
+                    json=gpt_sovits_payload,
+                    headers={"Content-Type": "application/json"},
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as r:
+                    r.raise_for_status()
+                    audio_bytes = await r.read()
+
+            async with aiofiles.open(file_path, "wb") as f:
+                await f.write(audio_bytes)
+            async with aiofiles.open(file_body_path, "w") as f:
+                await f.write(json.dumps(payload))
+
+            return FileResponse(
+                file_path,
+                media_type="audio/wav",
+                background=BackgroundTask(_route_file_to_cable, file_path),
+            )
+
+        except Exception as e:
+            log.exception(e)
+            detail = "Open WebUI: Server Connection Error"
+
+            if "r" in locals() and r is not None:
+                try:
+                    res = await r.text()
+                    if res:
+                        detail = f"GPT-SoVITS: {res}"
+                except Exception:
+                    detail = f"External: {e}"
+
+            raise HTTPException(
+                status_code=getattr(r, "status", 500) if "r" in locals() and r else 500,
+                detail=detail,
+            )
+
     elif request.app.state.config.TTS_ENGINE == "azure":
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -600,10 +767,16 @@ def transcription_handler(request, file_path, metadata, user=None):
 
     metadata = metadata or {}
 
+    # Get language preference from config (database), or from metadata, or default to None (auto-detect)
+    config_language = request.app.state.config.WHISPER_LANGUAGE
+    lang_from_config = config_language if config_language and config_language.lower() != "auto" else None
+    
     languages = [
-        metadata.get("language", None) if not WHISPER_LANGUAGE else WHISPER_LANGUAGE,
-        None,  # Always fallback to None in case transcription fails
+        lang_from_config or metadata.get("language", None),
+        None,  # Always fallback to None (auto-detect) in case transcription fails
     ]
+
+    log.info(f"🎤 Transcribing with language: {languages[0] or 'auto-detect'}")
 
     if request.app.state.config.STT_ENGINE == "":
         if request.app.state.faster_whisper_model is None:
@@ -1325,6 +1498,9 @@ def get_available_models(request: Request) -> list[dict]:
             ]
         except requests.RequestException as e:
             log.error(f"Error fetching voices: {str(e)}")
+    elif request.app.state.config.TTS_ENGINE == "gpt-sovits":
+        # GPT-SoVITS doesn't have selectable models, use a default
+        available_models = [{"name": "GPT-SoVITS", "id": "default"}]
     return available_models
 
 
@@ -1377,6 +1553,9 @@ def get_available_voices(request) -> dict:
         except Exception:
             # Avoided @lru_cache with exception
             pass
+    elif request.app.state.config.TTS_ENGINE == "gpt-sovits":
+        # GPT-SoVITS doesn't use voice IDs, just return empty dict
+        available_voices = {}
     elif request.app.state.config.TTS_ENGINE == "azure":
         try:
             region = request.app.state.config.TTS_AZURE_SPEECH_REGION

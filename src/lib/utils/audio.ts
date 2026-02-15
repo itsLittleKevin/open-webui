@@ -47,6 +47,7 @@ export class AudioQueue {
 		this.current = this.queue.shift();
 		if (this.current) {
 			this.audio.src = this.current;
+			this.audio.muted = false;
 			this.audio.play();
 			console.log('Playing audio URL:', this.current);
 		} else {

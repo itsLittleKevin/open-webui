@@ -37,6 +37,7 @@
 	let TTS_AZURE_SPEECH_REGION = '';
 	let TTS_AZURE_SPEECH_BASE_URL = '';
 	let TTS_AZURE_SPEECH_OUTPUT_FORMAT = '';
+	let TTS_GPTSOVITS_API_BASE_URL = '';
 
 	let STT_OPENAI_API_BASE_URL = '';
 	let STT_OPENAI_API_KEY = '';
@@ -44,6 +45,7 @@
 	let STT_MODEL = '';
 	let STT_SUPPORTED_CONTENT_TYPES = '';
 	let STT_WHISPER_MODEL = '';
+	let STT_WHISPER_LANGUAGE = '';
 	let STT_AZURE_API_KEY = '';
 	let STT_AZURE_REGION = '';
 	let STT_AZURE_LOCALES = '';
@@ -130,6 +132,7 @@
 				AZURE_SPEECH_REGION: TTS_AZURE_SPEECH_REGION,
 				AZURE_SPEECH_BASE_URL: TTS_AZURE_SPEECH_BASE_URL,
 				AZURE_SPEECH_OUTPUT_FORMAT: TTS_AZURE_SPEECH_OUTPUT_FORMAT,
+				GPTSOVITS_API_BASE_URL: TTS_GPTSOVITS_API_BASE_URL,
 				SPLIT_ON: TTS_SPLIT_ON
 			},
 			stt: {
@@ -139,6 +142,7 @@
 				MODEL: STT_MODEL,
 				SUPPORTED_CONTENT_TYPES: STT_SUPPORTED_CONTENT_TYPES.split(','),
 				WHISPER_MODEL: STT_WHISPER_MODEL,
+				WHISPER_LANGUAGE: STT_WHISPER_LANGUAGE,
 				WHISPER_HALLUCINATION_FILTERS: STT_WHISPER_HALLUCINATION_FILTERS,
 				DEEPGRAM_API_KEY: STT_DEEPGRAM_API_KEY,
 				AZURE_API_KEY: STT_AZURE_API_KEY,
@@ -183,6 +187,7 @@
 			TTS_AZURE_SPEECH_REGION = res.tts.AZURE_SPEECH_REGION;
 			TTS_AZURE_SPEECH_BASE_URL = res.tts.AZURE_SPEECH_BASE_URL;
 			TTS_AZURE_SPEECH_OUTPUT_FORMAT = res.tts.AZURE_SPEECH_OUTPUT_FORMAT;
+			TTS_GPTSOVITS_API_BASE_URL = res.tts.GPTSOVITS_API_BASE_URL || 'http://localhost:9880';
 
 			STT_OPENAI_API_BASE_URL = res.stt.OPENAI_API_BASE_URL;
 			STT_OPENAI_API_KEY = res.stt.OPENAI_API_KEY;
@@ -191,6 +196,7 @@
 			STT_MODEL = res.stt.MODEL;
 			STT_SUPPORTED_CONTENT_TYPES = (res?.stt?.SUPPORTED_CONTENT_TYPES ?? []).join(',');
 			STT_WHISPER_MODEL = res.stt.WHISPER_MODEL;
+			STT_WHISPER_LANGUAGE = res.stt.WHISPER_LANGUAGE;
 			STT_AZURE_API_KEY = res.stt.AZURE_API_KEY;
 			STT_AZURE_REGION = res.stt.AZURE_REGION;
 			STT_AZURE_LOCALES = res.stt.AZURE_LOCALES;
@@ -503,6 +509,21 @@
 						</div>
 					</div>
 
+					<div class="mt-2 mb-1.5">
+						<div class="mb-1.5 text-xs font-medium">{$i18n.t('STT Language')}</div>
+						<select
+							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+							bind:value={STT_WHISPER_LANGUAGE}
+						>
+							<option value="zh">Chinese (中文)</option>
+							<option value="en">English</option>
+							<option value="auto">Auto-detect (slower)</option>
+						</select>
+						<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+							{$i18n.t('Choose language for speech recognition. Auto-detect is slower.')}
+						</div>
+					</div>
+
 					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
 
 					<!-- Whisper Hallucination Filters -->
@@ -624,6 +645,7 @@
 							<option value="transformers">{$i18n.t('Transformers')} ({$i18n.t('Local')})</option>
 							<option value="openai">{$i18n.t('OpenAI')}</option>
 							<option value="elevenlabs">{$i18n.t('ElevenLabs')}</option>
+							<option value="gpt-sovits">{$i18n.t('GPT-SoVITS')} ({$i18n.t('Local')})</option>
 							<option value="azure">{$i18n.t('Azure AI Speech')}</option>
 						</select>
 					</div>
@@ -646,6 +668,18 @@
 					<div>
 						<div class="mt-1 flex gap-2 mb-1">
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_API_KEY} required />
+						</div>
+					</div>
+				{:else if TTS_ENGINE === 'gpt-sovits'}
+					<div>
+						<div class="mt-1 flex gap-2 mb-1">
+							<input
+								class="flex-1 w-full bg-transparent outline-hidden"
+								type="text"
+								placeholder={$i18n.t('API Base URL (e.g., http://localhost:9880)')}
+								bind:value={TTS_GPTSOVITS_API_BASE_URL}
+								required
+							/>
 						</div>
 					</div>
 				{:else if TTS_ENGINE === 'azure'}

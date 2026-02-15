@@ -138,6 +138,7 @@
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
+	let thinkingEnabled = false;
 
 	let showCommands = false;
 
@@ -1526,6 +1527,7 @@
 				messageContentParts[messageContentParts.length - 1] !== message.lastSentence
 			) {
 				message.lastSentence = messageContentParts[messageContentParts.length - 1];
+				console.debug('[streaming-tts-event] dispatching sentence:', message.lastSentence.substring(0, 50));
 				eventTarget.dispatchEvent(
 					new CustomEvent('chat', {
 						detail: {
@@ -1560,13 +1562,14 @@
 				document.getElementById(`speak-button-${message.id}`)?.click();
 			}
 
-			// Emit chat event for TTS
+			// Emit chat event for TTS (final sentence, skip if already dispatched)
 			let lastMessageContentPart =
 				getMessageContentParts(
 					removeAllDetails(message.content),
 					$config?.audio?.tts?.split_on ?? 'punctuation'
 				)?.at(-1) ?? '';
-			if (lastMessageContentPart) {
+			if (lastMessageContentPart && lastMessageContentPart !== message.lastSentence) {
+				message.lastSentence = lastMessageContentPart;
 				eventTarget.dispatchEvent(
 					new CustomEvent('chat', {
 						detail: { id: message.id, content: lastMessageContentPart }
@@ -1609,7 +1612,7 @@
 	// Chat functions
 	//////////////////////////
 
-	const submitPrompt = async (userPrompt, { _raw = false } = {}) => {
+	const submitPrompt = async (userPrompt, { _raw = false, isVoiceInput = false } = {}) => {
 		console.log('submitPrompt', userPrompt, $chatId);
 
 		const _selectedModels = selectedModels.map((modelId) =>
@@ -1718,7 +1721,8 @@
 			content: userPrompt,
 			files: _files.length > 0 ? _files : undefined,
 			timestamp: Math.floor(Date.now() / 1000), // Unix epoch
-			models: selectedModels
+			models: selectedModels,
+			isVoiceInput: isVoiceInput
 		};
 
 		// Add message to history and Set currentId to messageId
@@ -2067,6 +2071,7 @@
 				params: {
 					...$settings?.params,
 					...params,
+					think: thinkingEnabled ? true : undefined,
 					stop:
 						(params?.stop ?? $settings?.params?.stop ?? undefined)
 							? (params?.stop.split(',').map((token) => token.trim()) ?? $settings.params.stop).map(
@@ -2663,6 +2668,7 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
+									bind:thinkingEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
@@ -2708,7 +2714,10 @@
 										if (e.detail || files.length > 0) {
 											await tick();
 
-											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											submitPrompt(e.detail.replaceAll('\n\n', '\n'), {
+												isVoiceInput: messageInput?.isVoiceInput ?? false
+											});
+											messageInput.isVoiceInput = false;
 										}
 									}}
 								/>
@@ -2733,6 +2742,7 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
+									bind:thinkingEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
@@ -2749,7 +2759,10 @@
 										clearDraft();
 										if (e.detail || files.length > 0) {
 											await tick();
-											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											submitPrompt(e.detail.replaceAll('\n\n', '\n'), {
+												isVoiceInput: messageInput?.isVoiceInput ?? false
+											});
+											messageInput.isVoiceInput = false;
 										}
 									}}
 								/>

@@ -172,6 +172,166 @@
 	let loadingSpeech = false;
 
 	let showRateComment = false;
+	let autoTTSTriggered = false;
+
+	// --- Streaming TTS: pre-fetch audio as sentences arrive during LLM streaming ---
+	let streamingTTSActive = false;
+	let streamingTTSSentences: string[] = [];
+
+	// Eager prefetch: fire requests immediately, enqueue results in order
+	let streamingTTSPending: Promise<string | null>[] = [];
+	let streamingTTSEnqueueRunning = false;
+
+	// Helper: get voice ID (shared between speak() and streaming TTS)
+	const getVoiceId = () => {
+		if (model?.info?.meta?.tts?.voice) {
+			return model.info.meta.tts.voice;
+		}
+		if ($settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice) {
+			return $settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice;
+		}
+		return $config?.audio?.tts?.voice;
+	};
+
+	// Drain pending audio promises in order, enqueuing each result for playback
+	const _drainStreamingTTSQueue = async () => {
+		if (streamingTTSEnqueueRunning) return;
+		streamingTTSEnqueueRunning = true;
+		while (streamingTTSPending.length > 0) {
+			const promise = streamingTTSPending[0];
+			const url = await promise;
+			streamingTTSPending.shift();
+			if (url && speaking) {
+				$audioQueue.enqueue(url);
+				loadingSpeech = false;
+			}
+		}
+		streamingTTSEnqueueRunning = false;
+	};
+
+	// Fetch audio for one sentence — fires immediately (no sequential chaining)
+	// so GPT-SoVITS can process back-to-back without idle time between sentences
+	const streamingTTSFetch = (sentence: string) => {
+		const promise = (async (): Promise<string | null> => {
+			if (!speaking) return null;
+			try {
+				const voiceId = getVoiceId();
+				if ($settings.audio?.tts?.engine === 'browser-kokoro') {
+					if (!$TTSWorker) {
+						await TTSWorker.set(
+							new KokoroWorker({
+								dtype: $settings.audio?.tts?.engineConfig?.dtype ?? 'fp32'
+							})
+						);
+						await $TTSWorker.init();
+					}
+					const url = await $TTSWorker.generate({ text: sentence, voice: voiceId });
+					return url || null;
+				} else {
+					const res = await synthesizeOpenAISpeech(localStorage.token, voiceId, sentence);
+					if (res && speaking) {
+						const blob = await res.blob();
+						return URL.createObjectURL(blob);
+					}
+				}
+			} catch (error) {
+				console.error('Streaming TTS fetch error:', error);
+				loadingSpeech = false;
+			}
+			return null;
+		})();
+
+		streamingTTSPending.push(promise);
+		_drainStreamingTTSQueue();
+	};
+
+	// Consolidated streaming TTS processor — called on every message change.
+	// Uses a single $: dependency on `message` to guarantee it fires on each
+	// streaming token (Svelte 5 may not re-trigger multiple $: blocks reliably).
+	let _prevStreamingDone: boolean | undefined;
+
+	function processStreamingTTS(msg: typeof message) {
+		if (!msg) return;
+
+		const isVoiceInput = history?.messages?.[msg.parentId]?.isVoiceInput;
+		const hasEngine =
+			$config?.audio?.tts?.engine !== '' && $config?.audio?.tts?.engine !== undefined;
+
+		// Reset flags on new streaming message
+		if (!msg.done && !streamingTTSActive) {
+			autoTTSTriggered = false;
+			streamingTTSSentences = [];
+		}
+
+		// Bootstrap: activate streaming TTS on first real content
+		// (Use stripped content to avoid premature activation during thinking phase)
+		const strippedContent = removeAllDetails(msg.content ?? '');
+		if (
+			!msg.done &&
+			!streamingTTSActive &&
+			strippedContent.length >= 3 &&
+			isVoiceInput &&
+			hasEngine
+		) {
+			console.debug('[streaming-tts] bootstrap for', msg.id);
+			streamingTTSActive = true;
+			autoTTSTriggered = true;
+			speaking = true;
+			loadingSpeech = true;
+			streamingTTSSentences = [];
+			streamingTTSPending = [];
+			streamingTTSEnqueueRunning = false;
+
+			// Clear old callback before setId (setId→stop→onStopped would reset speaking)
+			$audioQueue.onStopped = null;
+			$audioQueue.setId(`${msg.id}`);
+			$audioQueue.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
+			$audioQueue.onStopped = () => {
+				speaking = false;
+				loadingSpeech = false;
+				speakingIdx = undefined;
+				streamingTTSActive = false;
+			};
+		}
+
+		if (!streamingTTSActive || !msg.content) return;
+
+		const allParts = getMessageContentParts(
+			removeAllDetails(msg.content),
+			$config?.audio?.tts?.split_on ?? 'punctuation'
+		);
+
+		if (!msg.done) {
+			// Streaming: dispatch only fully completed sentences (skip last — may be partial)
+			const completeParts = allParts.slice(0, -1);
+			for (let i = streamingTTSSentences.length; i < completeParts.length; i++) {
+				console.debug('[streaming-tts] sentence', i, completeParts[i].substring(0, 40));
+				streamingTTSSentences.push(completeParts[i]);
+				streamingTTSFetch(completeParts[i]);
+			}
+		} else if (msg.done && _prevStreamingDone !== true) {
+			// Message just finished — send ALL remaining parts (including the last partial)
+			for (let i = streamingTTSSentences.length; i < allParts.length; i++) {
+				console.debug('[streaming-tts] final', i, allParts[i].substring(0, 40));
+				streamingTTSSentences.push(allParts[i]);
+				streamingTTSFetch(allParts[i]);
+			}
+		}
+
+		_prevStreamingDone = msg.done;
+	}
+
+	// Single reactive call — guaranteed to fire on every `message` reassignment
+	$: processStreamingTTS(message);
+
+	// Fallback: if streaming TTS wasn't active (e.g. not voice input), use original behavior
+	$: if (message?.done && !autoTTSTriggered && !speaking && !loadingSpeech && history?.messages?.[message?.parentId]?.isVoiceInput && $config?.audio?.tts?.engine !== '') {
+		autoTTSTriggered = true;
+		(async () => {
+			await tick();
+			speak();
+		})();
+	}
 
 	const copyToClipboard = async (text) => {
 		text = removeAllDetails(text);
@@ -192,10 +352,9 @@
 			$audioQueue.stop();
 		} catch {}
 
-		if (speaking) {
-			speaking = false;
-			speakingIdx = undefined;
-		}
+		speaking = false;
+		loadingSpeech = false;
+		speakingIdx = undefined;
 	};
 
 	const speak = async () => {
@@ -206,19 +365,6 @@
 
 		speaking = true;
 		const content = removeAllDetails(message.content);
-
-		// Get voice: model-specific > user settings > config default
-		const getVoiceId = () => {
-			// Check for model-specific TTS voice first
-			if (model?.info?.meta?.tts?.voice) {
-				return model.info.meta.tts.voice;
-			}
-			// Fall back to user settings or config default
-			if ($settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice) {
-				return $settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice;
-			}
-			return $config?.audio?.tts?.voice;
-		};
 
 		if ($config.audio.tts.engine === '') {
 			let voices = [];
@@ -256,6 +402,7 @@
 			$audioQueue.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
 			$audioQueue.onStopped = () => {
 				speaking = false;
+				loadingSpeech = false;
 				speakingIdx = undefined;
 			};
 
@@ -308,24 +455,32 @@
 					}
 				}
 			} else {
-				for (const [idx, sentence] of messageContentParts.entries()) {
-					const res = await synthesizeOpenAISpeech(localStorage.token, voiceId, sentence).catch(
-						(error) => {
+				// Fire all sentence requests eagerly (GPT-SoVITS processes serially,
+				// but requests queue up so there's no idle time between sentences)
+				const fetchPromises = messageContentParts.map((sentence) =>
+					synthesizeOpenAISpeech(localStorage.token, voiceId, sentence)
+						.then(async (res) => {
+							if (res) {
+								const blob = await res.blob();
+								return URL.createObjectURL(blob);
+							}
+							return null;
+						})
+						.catch((error) => {
 							console.error(error);
 							toast.error(`${error}`);
+							return null;
+						})
+				);
 
-							speaking = false;
-							loadingSpeech = false;
-						}
-					);
-
-					if (res && speaking) {
-						const blob = await res.blob();
-						const url = URL.createObjectURL(blob);
-
+				// Enqueue results in order as they resolve
+				for (const promise of fetchPromises) {
+					const url = await promise;
+					if (url && speaking) {
 						$audioQueue.enqueue(url);
 						loadingSpeech = false;
 					}
+					if (!speaking) break;
 				}
 			}
 		}

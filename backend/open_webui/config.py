@@ -3818,7 +3818,7 @@ WHISPER_MODEL = PersistentConfig(
     os.getenv("WHISPER_MODEL", "base"),
 )
 
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8_float16")
 WHISPER_MODEL_DIR = os.getenv("WHISPER_MODEL_DIR", f"{CACHE_DIR}/whisper/models")
 WHISPER_MODEL_AUTO_UPDATE = (
     not OFFLINE_MODE
@@ -3829,7 +3829,11 @@ WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "False").lower() == "true"
 
 WHISPER_MULTILINGUAL = os.getenv("WHISPER_MULTILINGUAL", "False").lower() == "true"
 
-WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "").lower() or None
+WHISPER_LANGUAGE = PersistentConfig(
+    "WHISPER_LANGUAGE",
+    "audio.stt.whisper_language",
+    os.getenv("WHISPER_LANGUAGE", "zh"),
+)
 
 # Whisper hallucination filter rules
 # Each rule: {"pattern": str, "mode": "contains"|"exact"|"regex", "enabled": bool}
@@ -4037,6 +4041,36 @@ AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT = PersistentConfig(
     os.getenv(
         "AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT", "audio-24khz-160kbitrate-mono-mp3"
     ),
+)
+
+AUDIO_TTS_GPTSOVITS_API_BASE_URL = PersistentConfig(
+    "AUDIO_TTS_GPTSOVITS_API_BASE_URL",
+    "audio.tts.gptsovits.api_base_url",
+    os.getenv("AUDIO_TTS_GPTSOVITS_API_BASE_URL", "http://localhost:9880"),
+)
+
+AUDIO_TTS_GPTSOVITS_TEXT_LANG = PersistentConfig(
+    "AUDIO_TTS_GPTSOVITS_TEXT_LANG",
+    "audio.tts.gptsovits.text_lang",
+    os.getenv("AUDIO_TTS_GPTSOVITS_TEXT_LANG", "zh"),
+)
+
+AUDIO_TTS_GPTSOVITS_PROMPT_LANG = PersistentConfig(
+    "AUDIO_TTS_GPTSOVITS_PROMPT_LANG",
+    "audio.tts.gptsovits.prompt_lang",
+    os.getenv("AUDIO_TTS_GPTSOVITS_PROMPT_LANG", "zh"),
+)
+
+AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH = PersistentConfig(
+    "AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH",
+    "audio.tts.gptsovits.ref_audio_path",
+    os.getenv("AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH", "reference_audio/default_reference.wav"),
+)
+
+AUDIO_TTS_GPTSOVITS_REF_TEXT = PersistentConfig(
+    "AUDIO_TTS_GPTSOVITS_REF_TEXT",
+    "audio.tts.gptsovits.ref_text",
+    os.getenv("AUDIO_TTS_GPTSOVITS_REF_TEXT", ""),
 )
 
 
