@@ -72,11 +72,12 @@
 		<!-- Keine Vorschläge -->
 
 		<div
-			class="flex w-full {$settings?.landingPageMode === 'chat'
+			class="flex flex-col w-full {$settings?.landingPageMode === 'chat'
 				? ' -mt-1'
-				: 'text-center items-center justify-center'}  self-start text-gray-600 dark:text-gray-400"
+				: 'text-center items-center justify-center'}  self-start text-gray-600 dark:text-gray-400 gap-2"
 		>
-			{$WEBUI_NAME} ‧ v{WEBUI_VERSION}
+			<div>Powered By {$WEBUI_NAME} ‧ v{WEBUI_VERSION} Modified</div>
+			<div>LLMs could make mistakes</div>
 		</div>
 	{/if}
 </div>

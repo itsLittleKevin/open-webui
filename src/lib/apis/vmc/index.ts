@@ -21,6 +21,15 @@ export const getPresets = async (token: string) => {
 	return res.json();
 };
 
+export const getPreset = async (token: string, name: string) => {
+	const res = await fetch(`${VMC_BASE}/presets/${encodeURIComponent(name)}`, {
+		method: 'GET',
+		headers: headers(token)
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
 export const deletePreset = async (token: string, name: string) => {
 	const res = await fetch(`${VMC_BASE}/presets/${encodeURIComponent(name)}`, {
 		method: 'DELETE',

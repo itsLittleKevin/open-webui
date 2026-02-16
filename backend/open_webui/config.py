@@ -4061,16 +4061,36 @@ AUDIO_TTS_GPTSOVITS_PROMPT_LANG = PersistentConfig(
     os.getenv("AUDIO_TTS_GPTSOVITS_PROMPT_LANG", "zh"),
 )
 
+# Default GPT-SoVITS reference audio path (absolute)
+def _get_default_gptsovits_ref_audio_path():
+    # Try: vendor/GPT-SoVITS/reference_audio/default_reference.wav
+    project_root = Path(__file__).parent.parent.parent.parent  # go up to project root
+    default_path = project_root / "vendor" / "GPT-SoVITS" / "reference_audio" / "default_reference.wav"
+    if default_path.exists():
+        return str(default_path)
+    return os.getenv("AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH", "")
+
+# Default GPT-SoVITS reference text (read from file if exists)
+def _get_default_gptsovits_ref_text():
+    project_root = Path(__file__).parent.parent.parent.parent
+    ref_text_file = project_root / "vendor" / "GPT-SoVITS" / "reference_audio" / "default_reference.txt"
+    if ref_text_file.exists():
+        try:
+            return ref_text_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+    return os.getenv("AUDIO_TTS_GPTSOVITS_REF_TEXT", "")
+
 AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH = PersistentConfig(
     "AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH",
     "audio.tts.gptsovits.ref_audio_path",
-    os.getenv("AUDIO_TTS_GPTSOVITS_REF_AUDIO_PATH", "reference_audio/default_reference.wav"),
+    _get_default_gptsovits_ref_audio_path(),
 )
 
 AUDIO_TTS_GPTSOVITS_REF_TEXT = PersistentConfig(
     "AUDIO_TTS_GPTSOVITS_REF_TEXT",
     "audio.tts.gptsovits.ref_text",
-    os.getenv("AUDIO_TTS_GPTSOVITS_REF_TEXT", ""),
+    _get_default_gptsovits_ref_text(),
 )
 
 

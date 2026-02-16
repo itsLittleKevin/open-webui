@@ -4,8 +4,10 @@
 	import { updateUserSettings } from '$lib/apis/users';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
+	import VrmAvatarNative from './VrmAvatarNative.svelte';
 	import {
 		getPresets,
+		getPreset,
 		deletePreset,
 		startRecording,
 		stopRecording,
@@ -22,6 +24,14 @@
 		captureRestPose,
 		resetRestPose
 	} from '$lib/apis/vmc';
+	import type { RecordedAnimation } from '$lib/utils/faceTracking';
+	import { 
+		getPrimaryVRM, setPrimaryVRM, arrayBufferToFile, 
+		saveCameraPreset, loadCameraPreset, deleteCameraPreset, listCameraPresets, 
+		getLastCameraPreset, saveLastCameraPreset, generatePresetId, type CameraPreset,
+		saveAnimationPreset, loadAnimationPreset, deleteAnimationPreset, listAnimationPresets,
+		generateAnimationId, type AnimationPreset
+	} from '$lib/utils/vrmStorage';
 
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
@@ -99,6 +109,45 @@
 	let vrmBgGradientMidOpacity = 50;
 	let vrmBgGradientEndOpacity = 100;
 	let vrmBgGradientMidpoint = 50;
+
+	// ── Mode Toggle: Camera (VSeeFace) vs Native (Browser VRM) ──────────
+	let vrmRenderMode: 'camera' | 'native' = 'camera';
+	let vrmNativeFile: File | null = null;
+	let vrmNativeRef: VrmAvatarNative | null = null;
+	let vrmFileInput: HTMLInputElement;
+	let nativeRecording = false;
+	let nativeRecordName = '';
+	let nativeFaceTracking = false;
+	let nativeStatus = '';
+	let nativeFocalLength = 135; // 70-240mm range, default 135mm for telephoto look
+	
+	// Shader/Lighting settings
+	let nativeMainLightIntensity = 1.0;
+	let nativeAmbientLightIntensity = 0.4;
+	let nativeRimLightIntensity = 0.5;
+	let nativeEnvironmentIntensity = 0.6;
+	let nativeToneMappingExposure = 1.0;
+	let nativeContrast = 1.0;
+	let nativeSaturation = 1.0;
+	
+	// MToon shader enhancements
+	let nativeMatcapIntensity = 0.5;
+	let nativeRimFresnelPower = 3.0;
+	let nativeRimLift = 0.3;
+	
+	// Rest pose - arms down instead of T-pose
+	let nativeRestPose = true;
+
+	// Camera presets
+	let cameraPresets: CameraPreset[] = [];
+	let cameraPresetName = '';
+	let loadingPresets = false;
+	let autoSaveTimer: number = 0;
+	
+	// Animation presets
+	let animationPresets: AnimationPreset[] = [];
+	let loadingAnimations = false;
+	let nativeIdleAnimation: AnimationPreset | null = null;
 
 	// Track the object ref we last wrote, so we can distinguish self-updates from external ones
 	let _lastWrittenSettings: any = null;
@@ -281,6 +330,466 @@
 		vrmBgGradientMidOpacity = $settings?.vrmBgGradientMidOpacity ?? 50;
 		vrmBgGradientEndOpacity = $settings?.vrmBgGradientEndOpacity ?? 100;
 		vrmBgGradientMidpoint = $settings?.vrmBgGradientMidpoint ?? 50;
+		vrmRenderMode = $settings?.vrmRenderMode ?? 'camera';
+		nativeFocalLength = $settings?.nativeFocalLength ?? 135;
+		nativeMainLightIntensity = $settings?.nativeMainLightIntensity ?? 1.0;
+		nativeAmbientLightIntensity = $settings?.nativeAmbientLightIntensity ?? 0.4;
+		nativeRimLightIntensity = $settings?.nativeRimLightIntensity ?? 0.5;
+		nativeEnvironmentIntensity = $settings?.nativeEnvironmentIntensity ?? 0.6;
+		nativeToneMappingExposure = $settings?.nativeToneMappingExposure ?? 1.0;
+		nativeContrast = $settings?.nativeContrast ?? 1.0;
+		nativeSaturation = $settings?.nativeSaturation ?? 1.0;
+		nativeMatcapIntensity = $settings?.nativeMatcapIntensity ?? 0.5;
+		nativeRimFresnelPower = $settings?.nativeRimFresnelPower ?? 3.0;
+		nativeRimLift = $settings?.nativeRimLift ?? 0.3;
+		nativeRestPose = $settings?.nativeRestPose ?? true;
+	}
+
+	// ── Native VRM Functions ─────────────────────────────────────────────
+
+	async function handleVrmFileSelect(event: Event) {
+		const input = event.target as HTMLInputElement;
+		if (input.files && input.files.length > 0) {
+			vrmNativeFile = input.files[0];
+			nativeStatus = `Loading: ${vrmNativeFile.name}...`;
+			
+			// Persist to IndexedDB for next session
+			try {
+				await setPrimaryVRM(vrmNativeFile.name, vrmNativeFile);
+				nativeStatus = `Loaded: ${vrmNativeFile.name}`;
+			} catch (e) {
+				console.error('Failed to persist VRM:', e);
+				nativeStatus = `Loaded: ${vrmNativeFile.name} (not persisted)`;
+			}
+		}
+	}
+
+	async function loadStoredVRM() {
+		try {
+			const stored = await getPrimaryVRM();
+			if (stored) {
+				vrmNativeFile = arrayBufferToFile(stored.data, stored.name);
+				nativeStatus = `Restored: ${stored.name}`;
+			}
+		} catch (e) {
+			console.error('Failed to load stored VRM:', e);
+		}
+	}
+
+	async function nativeStartFaceTracking() {
+		if (!vrmNativeRef) return;
+		try {
+			await vrmNativeRef.startFaceTracking();
+			nativeFaceTracking = true;
+			nativeStatus = 'Face tracking active';
+		} catch (e: any) {
+			nativeStatus = e?.message || 'Failed to start face tracking';
+		}
+	}
+
+	function nativeStopFaceTracking() {
+		if (!vrmNativeRef) return;
+		vrmNativeRef.stopFaceTracking();
+		nativeFaceTracking = false;
+		nativeStatus = 'Face tracking stopped';
+	}
+
+	async function nativeStartRecording() {
+		const name = nativeRecordName.trim();
+		if (!name) {
+			nativeStatus = 'Enter a preset name first';
+			return;
+		}
+		if (!vrmNativeRef) return;
+		try {
+			await vrmNativeRef.startRecording();
+			nativeRecording = true;
+			nativeStatus = 'Recording...';
+		} catch (e: any) {
+			nativeStatus = e?.message || 'Failed to start recording';
+		}
+	}
+
+	async function nativeStopRecording() {
+		const name = nativeRecordName.trim();
+		if (!name || !vrmNativeRef || !vrmNativeFile) return;
+		
+		const animation = vrmNativeRef.stopRecording(name);
+		nativeRecording = false;
+		nativeRecordName = '';
+		
+		if (animation) {
+			// Save animation to IndexedDB
+			try {
+				await saveAnimationPreset({
+					id: generateAnimationId(),
+					name,
+					vrmName: vrmNativeFile.name,
+					frames: animation.frames,
+					duration: animation.duration,
+					fps: animation.fps
+				});
+				nativeStatus = `Saved "${name}" (${animation.frames.length} frames, ${(animation.duration / 1000).toFixed(1)}s)`;
+				await loadAnimationPresetsForVRM();
+			} catch (e: any) {
+				nativeStatus = `Recording complete but save failed: ${e.message}`;
+			}
+		}
+	}
+	
+	// ── Animation Presets ──────────────────────────────────────────────
+	
+	async function loadAnimationPresetsForVRM() {
+		if (!vrmNativeFile) return;
+		loadingAnimations = true;
+		try {
+			animationPresets = await listAnimationPresets(vrmNativeFile.name);
+		} catch (e) {
+			console.error('Failed to load animation presets:', e);
+			animationPresets = [];
+		}
+		loadingAnimations = false;
+	}
+	
+	async function playNativeAnimation(preset: AnimationPreset) {
+		if (!vrmNativeRef) return;
+		try {
+			// Convert AnimationPreset to RecordedAnimation format
+			const animation: RecordedAnimation = {
+				name: preset.name,
+				frames: preset.frames as any, // The types match
+				duration: preset.duration,
+				fps: preset.fps
+			};
+			await vrmNativeRef.playAnimation(animation);
+			nativeStatus = `Playing "${preset.name}"`;
+		} catch (e: any) {
+			nativeStatus = `Playback failed: ${e.message}`;
+		}
+	}
+	
+	function stopNativeAnimation() {
+		if (!vrmNativeRef) return;
+		try {
+			vrmNativeRef.stopAnimation();
+			nativeStatus = 'Animation stopped';
+		} catch (e: any) {
+			nativeStatus = `Stop failed: ${e.message}`;
+		}
+	}
+	
+	function setNativeIdleAnimation(preset: AnimationPreset) {
+		nativeIdleAnimation = preset;
+		nativeStatus = `Set "${preset.name}" as idle animation`;
+		// The idle animation can be passed to VrmAvatarNative via prop
+	}
+	
+	async function deleteNativeAnimation(preset: AnimationPreset) {
+		try {
+			await deleteAnimationPreset(preset.id);
+			if (nativeIdleAnimation?.id === preset.id) {
+				nativeIdleAnimation = null;
+			}
+			await loadAnimationPresetsForVRM();
+			nativeStatus = `Deleted "${preset.name}"`;
+		} catch (e: any) {
+			nativeStatus = `Delete failed: ${e.message}`;
+		}
+	}
+	
+	/**
+	 * Convert quaternion [x, y, z, w] to euler angles [pitch, yaw, roll] in radians
+	 * VMC/Unity uses left-handed coords, Three.js uses right-handed
+	 * We negate qx and qz to flip handedness, then extract XYZ euler angles
+	 */
+	function quaternionToEuler(q: number[]): { pitch: number; yaw: number; roll: number } {
+		// VMC quaternion: [x, y, z, w] in Unity left-hand coords
+		// Convert to Three.js right-hand by negating x and z
+		const qx = -q[0];
+		const qy = q[1];
+		const qz = -q[2];
+		const qw = q[3];
+		
+		// Extract Euler angles in XYZ order (Three.js default)
+		// pitch = X rotation (nodding up/down)
+		const sinp = 2 * (qw * qx + qy * qz);
+		const cosp = 1 - 2 * (qx * qx + qy * qy);
+		const pitch = Math.atan2(sinp, cosp);
+		
+		// yaw = Y rotation (shaking head left/right)
+		const siny = 2 * (qw * qy - qz * qx);
+		// Clamp to avoid NaN from asin
+		const yaw = Math.abs(siny) >= 1 
+			? Math.sign(siny) * Math.PI / 2 
+			: Math.asin(siny);
+		
+		// roll = Z rotation (tilting head sideways)
+		const sinr = 2 * (qw * qz + qx * qy);
+		const cosr = 1 - 2 * (qy * qy + qz * qz);
+		const roll = Math.atan2(sinr, cosr);
+		
+		return { pitch, yaw, roll };
+	}
+	
+	/**
+	 * Convert VMC frames to native animation format
+	 */
+	function convertVMCFramesToNative(vmcFrames: any[]): AnimationPreset['frames'] {
+		return vmcFrames.map(frame => {
+			const result: AnimationPreset['frames'][0] = {};
+			
+			// Extract head rotation from bones if available
+			if (frame.bones?.Head) {
+				const bone = frame.bones.Head;
+				// VMC stores bones as { pos: [x,y,z], rot: [x,y,z,w] }
+				if (bone.rot && Array.isArray(bone.rot) && bone.rot.length === 4) {
+					result.headRotation = quaternionToEuler(bone.rot);
+				}
+			}
+			
+			// Extract left eye rotation for iris/pupil tracking
+			if (frame.bones?.LeftEye) {
+				const bone = frame.bones.LeftEye;
+				if (bone.rot && Array.isArray(bone.rot) && bone.rot.length === 4) {
+					result.leftEyeRotation = quaternionToEuler(bone.rot);
+				}
+			}
+			
+			// Extract right eye rotation for iris/pupil tracking
+			if (frame.bones?.RightEye) {
+				const bone = frame.bones.RightEye;
+				if (bone.rot && Array.isArray(bone.rot) && bone.rot.length === 4) {
+					result.rightEyeRotation = quaternionToEuler(bone.rot);
+				}
+			}
+			
+			// Extract ALL blendshapes (facial expressions, eye blinks, etc.)
+			if (frame.blendshapes && Object.keys(frame.blendshapes).length > 0) {
+				result.blendshapes = { ...frame.blendshapes };
+				
+				// Also extract blink values for convenience
+				const leftBlink = frame.blendshapes.blinkLeft ?? 
+					frame.blendshapes.Blink_L ?? 
+					frame.blendshapes.eyeBlinkLeft ?? 0;
+				const rightBlink = frame.blendshapes.blinkRight ?? 
+					frame.blendshapes.Blink_R ?? 
+					frame.blendshapes.eyeBlinkRight ?? 0;
+				
+				if (leftBlink > 0) result.leftEyeBlink = leftBlink;
+				if (rightBlink > 0) result.rightEyeBlink = rightBlink;
+			}
+			
+			return result;
+		}).filter(f => f.headRotation || f.leftEyeRotation || f.rightEyeRotation || f.blendshapes || f.leftEyeBlink !== undefined);
+	}
+	
+	/**
+	 * Import a VMC preset to native animations
+	 */
+	async function importVMCPresetToNative(presetName: string) {
+		if (!vrmNativeFile) {
+			nativeStatus = 'Load a VRM model first';
+			return;
+		}
+		
+		try {
+			nativeStatus = `Importing "${presetName}"...`;
+			
+			// Fetch full preset from backend with all frames
+			const vmcPreset = await getPreset(localStorage.token, presetName);
+			
+			if (!vmcPreset.frames || vmcPreset.frames.length === 0) {
+				nativeStatus = `No frames found in "${presetName}"`;
+				return;
+			}
+			
+			// Convert frames
+			const nativeFrames = convertVMCFramesToNative(vmcPreset.frames);
+			
+			if (nativeFrames.length === 0) {
+				nativeStatus = `No convertible data in "${presetName}" (no head/blink data)`;
+				return;
+			}
+			
+			// Calculate FPS from frame timing
+			const fps = vmcPreset.frame_count && vmcPreset.duration_ms > 0 
+				? Math.round(vmcPreset.frame_count / (vmcPreset.duration_ms / 1000))
+				: 30;
+			
+			// Save as native animation
+			await saveAnimationPreset({
+				id: generateAnimationId(),
+				name: `VMC: ${presetName}`,
+				vrmName: vrmNativeFile.name,
+				frames: nativeFrames,
+				duration: vmcPreset.duration_ms ?? 0,
+				fps
+			});
+			
+			await loadAnimationPresetsForVRM();
+			nativeStatus = `Imported "${presetName}" (${nativeFrames.length} frames)`;
+		} catch (e: any) {
+			console.error('Import failed:', e);
+			nativeStatus = `Import failed: ${e.message || String(e)}`;
+		}
+	}
+	
+	/**
+	 * Import all VMC presets to native animations
+	 */
+	async function importAllVMCPresetsToNative() {
+		if (!vrmNativeFile) {
+			nativeStatus = 'Load a VRM model first';
+			return;
+		}
+		
+		nativeStatus = 'Importing all VMC presets...';
+		let imported = 0;
+		let failed = 0;
+		
+		for (const preset of vmcPresets) {
+			try {
+				await importVMCPresetToNative(preset.name);
+				imported++;
+			} catch {
+				failed++;
+			}
+		}
+		
+		await loadAnimationPresetsForVRM();
+		nativeStatus = `Imported ${imported} presets${failed > 0 ? `, ${failed} failed` : ''}`;
+	}
+
+	// ── Camera Presets ─────────────────────────────────────────────────
+
+	async function loadCameraPresets() {
+		if (!vrmNativeFile) return;
+		loadingPresets = true;
+		try {
+			cameraPresets = await listCameraPresets(vrmNativeFile.name);
+		} catch (e) {
+			console.error('Failed to load camera presets:', e);
+			cameraPresets = [];
+		}
+		loadingPresets = false;
+	}
+
+	async function saveCameraPresetFromCurrent() {
+		const name = cameraPresetName.trim();
+		if (!name || !vrmNativeRef || !vrmNativeFile) {
+			nativeStatus = 'Enter a preset name first';
+			return;
+		}
+
+		const state = vrmNativeRef.getCameraState();
+		if (!state) {
+			nativeStatus = 'No camera state available';
+			return;
+		}
+
+		try {
+			await saveCameraPreset({
+				id: generatePresetId(),
+				name,
+				vrmName: vrmNativeFile.name,
+				...state
+			});
+			cameraPresetName = '';
+			nativeStatus = `Saved camera preset "${name}"`;
+			await loadCameraPresets();
+		} catch (e) {
+			console.error('Failed to save camera preset:', e);
+			nativeStatus = 'Failed to save preset';
+		}
+	}
+
+	async function applyCameraPreset(preset: CameraPreset) {
+		if (!vrmNativeRef) return;
+		
+		vrmNativeRef.setCameraState({
+			cameraDistance: preset.cameraDistance,
+			cameraTargetY: preset.cameraTargetY,
+			cameraOffsetX: preset.cameraOffsetX,
+			cameraOffsetY: preset.cameraOffsetY,
+			modelRotationX: preset.modelRotationX,
+			modelRotationY: preset.modelRotationY,
+			focalLength: preset.focalLength,
+			lightTheta: preset.lightTheta,
+			lightPhi: preset.lightPhi
+		});
+		
+		// Update local focal length state
+		nativeFocalLength = preset.focalLength;
+		
+		nativeStatus = `Applied preset "${preset.name}"`;
+	}
+
+	async function deleteCameraPresetById(id: string) {
+		try {
+			await deleteCameraPreset(id);
+			nativeStatus = 'Preset deleted';
+			await loadCameraPresets();
+		} catch (e) {
+			console.error('Failed to delete preset:', e);
+			nativeStatus = 'Failed to delete preset';
+		}
+	}
+
+	// Auto-save camera state when it changes (debounced)
+	function scheduleAutoSave() {
+		if (!vrmNativeFile || !vrmNativeRef) return;
+		
+		// Clear previous timer
+		if (autoSaveTimer) {
+			clearTimeout(autoSaveTimer);
+		}
+		
+		// Schedule save after 1 second of no changes
+		autoSaveTimer = window.setTimeout(async () => {
+			const state = vrmNativeRef?.getCameraState();
+			if (!state || !vrmNativeFile) return;
+			
+			try {
+				await saveLastCameraPreset(vrmNativeFile.name, state);
+			} catch (e) {
+				console.error('Failed to auto-save camera state:', e);
+			}
+		}, 1000);
+	}
+
+	// Restore last camera state when VRM loads
+	async function restoreLastCameraState() {
+		if (!vrmNativeFile || !vrmNativeRef) return;
+		
+		try {
+			const lastPreset = await getLastCameraPreset(vrmNativeFile.name);
+			if (lastPreset) {
+				vrmNativeRef.setCameraState({
+					cameraDistance: lastPreset.cameraDistance,
+					cameraTargetY: lastPreset.cameraTargetY,
+					cameraOffsetX: lastPreset.cameraOffsetX,
+					cameraOffsetY: lastPreset.cameraOffsetY,
+					modelRotationX: lastPreset.modelRotationX,
+					modelRotationY: lastPreset.modelRotationY,
+					focalLength: lastPreset.focalLength,
+					lightTheta: lastPreset.lightTheta,
+					lightPhi: lastPreset.lightPhi
+				});
+				nativeFocalLength = lastPreset.focalLength;
+				nativeStatus = 'Restored last camera position';
+			}
+		} catch (e) {
+			console.error('Failed to restore camera state:', e);
+		}
+		
+		// Load presets list
+		await loadCameraPresets();
+		await loadAnimationPresetsForVRM();
+	}
+
+	// Handle camera change events for auto-save
+	function handleCameraChange() {
+		scheduleAutoSave();
 	}
 
 	// Re-load VRM settings when the store changes externally (e.g. API fetch on startup)
@@ -600,12 +1109,17 @@
 	// Drag handlers
 	function onMouseDown(e: MouseEvent) {
 		if ((e.target as HTMLElement).closest('.no-drag')) return;
+		// Skip dragging when Alt/Ctrl is pressed (for VRM interaction controls)
+		if (e.altKey || e.ctrlKey) return;
 		dragging = true;
 		dragOffset = { x: e.clientX - pos.x, y: e.clientY - pos.y };
 		e.preventDefault();
 	}
 
 	function onMouseMove(e: MouseEvent) {
+		// Skip if Alt/Ctrl is pressed (VRM interaction mode)
+		if (e.altKey || e.ctrlKey) return;
+		
 		if (dragging) {
 			pos = {
 				x: Math.max(0, Math.min(window.innerWidth - overlayWidth, e.clientX - dragOffset.x)),
@@ -647,10 +1161,17 @@
 	}
 
 	// Reactivity: start/stop stream when visibility or device changes
-	$: if ($showVrmAvatar && selectedDeviceId) {
+	$: if ($showVrmAvatar && selectedDeviceId && vrmRenderMode === 'camera') {
 		startStream();
+	} else if (vrmRenderMode === 'native') {
+		stopStream();
 	} else {
 		stopStream();
+	}
+
+	// Load stored VRM when switching to native mode
+	$: if (vrmRenderMode === 'native' && !vrmNativeFile) {
+		loadStoredVRM();
 	}
 
 	onMount(async () => {
@@ -663,6 +1184,11 @@
 		window.addEventListener('mousemove', onMouseMove);
 		window.addEventListener('mouseup', onMouseUp);
 		navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
+		
+		// Load stored VRM for native mode
+		if (vrmRenderMode === 'native') {
+			await loadStoredVRM();
+		}
 	});
 
 	onDestroy(() => {
@@ -694,9 +1220,10 @@
 			class="absolute top-0 left-0 right-0 flex items-center justify-between px-3 py-1.5 bg-gray-900/90 cursor-move text-white text-xs"
 			style="z-index: 15; transition: opacity 0.15s ease;"
 		>
-			<span class="font-medium opacity-80">VRM Avatar</span>
+			<span class="font-medium opacity-80">{vrmRenderMode === 'native' ? 'VRM (Native)' : 'VRM Avatar'}</span>
 			<div class="flex items-center gap-1.5 no-drag">
-				<!-- Camera select -->
+				<!-- Camera select (only in camera mode) -->
+				{#if vrmRenderMode === 'camera'}
 				<Tooltip content={$i18n.t('Select Camera')}>
 					<button
 						class="p-1 rounded hover:bg-gray-700 transition"
@@ -717,6 +1244,7 @@
 						</svg>
 					</button>
 				</Tooltip>
+				{/if}
 				<!-- Settings -->
 				<Tooltip content={$i18n.t('Settings')}>
 					<button
@@ -826,7 +1354,44 @@
 				{/if}
 			{/each}
 
-			{#if cameraError}
+			{#if vrmRenderMode === 'native'}
+				<!-- Native VRM Renderer (no VSeeFace needed) -->
+				<VrmAvatarNative
+					bind:this={vrmNativeRef}
+					width={overlayWidth}
+					height={overlayHeight}
+					backgroundColor={vrmBgColor}
+					backgroundAlpha={(100 - vrmBgTransparency) / 100}
+					vrmFile={vrmNativeFile}
+					enableLipSync={true}
+					enableFaceTracking={nativeFaceTracking}
+					focalLength={nativeFocalLength}
+					mainLightIntensity={nativeMainLightIntensity}
+					ambientLightIntensity={nativeAmbientLightIntensity}
+					rimLightIntensity={nativeRimLightIntensity}
+					environmentIntensity={nativeEnvironmentIntensity}
+					toneMappingExposure={nativeToneMappingExposure}
+					contrast={nativeContrast}
+					saturation={nativeSaturation}
+					matcapIntensity={nativeMatcapIntensity}
+					rimFresnelPower={nativeRimFresnelPower}
+					rimLift={nativeRimLift}
+					restPose={nativeRestPose}
+					idleAnimation={nativeIdleAnimation ? { name: nativeIdleAnimation.name, frames: nativeIdleAnimation.frames, duration: nativeIdleAnimation.duration, fps: nativeIdleAnimation.fps } : null}
+					on:loaded={restoreLastCameraState}
+					on:zoomChange={handleCameraChange}
+					on:modelRotate={handleCameraChange}
+					on:lightMove={handleCameraChange}
+					on:cameraPan={handleCameraChange}
+				>
+					<div slot="placeholder" class="flex flex-col items-center justify-center gap-2 p-4">
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 text-gray-500">
+							<path fill-rule="evenodd" d="M10.5 3.75a6 6 0 0 0-5.98 6.496A5.25 5.25 0 0 0 6.75 20.25H18a4.5 4.5 0 0 0 2.206-8.423 3.75 3.75 0 0 0-4.133-4.303A6.001 6.001 0 0 0 10.5 3.75Zm2.03 5.47a.75.75 0 0 0-1.06 0l-3 3a.75.75 0 1 0 1.06 1.06l1.72-1.72v4.94a.75.75 0 0 0 1.5 0v-4.94l1.72 1.72a.75.75 0 1 0 1.06-1.06l-3-3Z" clip-rule="evenodd" />
+						</svg>
+						<span class="text-xs text-gray-500 text-center">{$i18n.t('Upload VRM in settings')}</span>
+					</div>
+				</VrmAvatarNative>
+			{:else if cameraError}
 				<div
 					class="flex items-center justify-center h-full text-xs text-red-400 px-4 text-center"
 					style="z-index: 1; position: relative;"
@@ -915,6 +1480,431 @@
 
 			<!-- Scrollable content -->
 			<div class="p-3 flex flex-col gap-2 overflow-y-auto no-drag" style="max-height: 520px;">
+				
+				<!-- ── Render Mode ─────────────────────────────────────────── -->
+				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">{$i18n.t('Render Mode')}</div>
+				
+				<div class="flex gap-1.5">
+					<button
+						type="button"
+						class="flex-1 text-xs px-2 py-1.5 rounded transition {vrmRenderMode === 'native' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+						on:click={() => { vrmRenderMode = 'native'; saveSettings({ vrmRenderMode }); }}
+					>
+						{$i18n.t('Native VRM')}
+					</button>
+					<button
+						type="button"
+						class="flex-1 text-xs px-2 py-1.5 rounded transition {vrmRenderMode === 'camera' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+						on:click={() => { vrmRenderMode = 'camera'; saveSettings({ vrmRenderMode }); }}
+					>
+						{$i18n.t('Camera (VSeeFace)')}
+					</button>
+				</div>
+
+				<div class="text-[10px] text-gray-500 mb-1">
+					{#if vrmRenderMode === 'native'}
+						{$i18n.t('Renders VRM directly in browser - no VSeeFace needed')}
+					{:else}
+						{$i18n.t('Captures from VSeeFace virtual camera')}
+					{/if}
+				</div>
+
+				<!-- ── Native VRM Settings ─────────────────────────────────── -->
+				{#if vrmRenderMode === 'native'}
+				<div class="border border-gray-700 rounded-lg p-2 flex flex-col gap-2 mb-1">
+					<div class="text-xs font-medium">{$i18n.t('VRM Model')}</div>
+					
+					<!-- File upload -->
+					<input
+						type="file"
+						accept=".vrm"
+						class="hidden"
+						bind:this={vrmFileInput}
+						on:change={handleVrmFileSelect}
+					/>
+					<button
+						type="button"
+						class="w-full text-xs px-2 py-2 rounded bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-2"
+						on:click={() => vrmFileInput?.click()}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+							<path d="M9.25 13.25a.75.75 0 0 0 1.5 0V4.636l2.955 3.129a.75.75 0 0 0 1.09-1.03l-4.25-4.5a.75.75 0 0 0-1.09 0l-4.25 4.5a.75.75 0 1 0 1.09 1.03L9.25 4.636v8.614Z" />
+							<path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
+						</svg>
+						{vrmNativeFile ? vrmNativeFile.name : $i18n.t('Upload VRM File')}
+					</button>
+
+					<!-- Face Tracking -->
+					<div class="text-xs font-medium mt-1">{$i18n.t('Face Tracking (Webcam)')}</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Use your webcam to control head and eye movement')}</div>
+					
+					<div class="flex gap-1.5">
+						{#if !nativeFaceTracking}
+							<button
+								type="button"
+								class="flex-1 text-xs px-2 py-1.5 rounded bg-green-600 hover:bg-green-700 text-white"
+								on:click={nativeStartFaceTracking}
+							>
+								{$i18n.t('Start Tracking')}
+							</button>
+						{:else}
+							<button
+								type="button"
+								class="flex-1 text-xs px-2 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white"
+								on:click={nativeStopFaceTracking}
+							>
+								{$i18n.t('Stop Tracking')}
+							</button>
+						{/if}
+					</div>
+
+					<!-- Recording -->
+					<div class="text-xs font-medium mt-1">{$i18n.t('Record Movement')}</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Record head movements to create animation presets')}</div>
+					
+					<div class="flex items-center gap-1.5">
+						<input
+							type="text"
+							class="flex-1 text-xs px-1.5 py-1 rounded border border-gray-600 bg-transparent min-w-0"
+							placeholder={$i18n.t('Preset name')}
+							bind:value={nativeRecordName}
+						/>
+						{#if !nativeRecording}
+							<button
+								type="button"
+								class="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 flex items-center gap-1"
+								on:click={nativeStartRecording}
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3">
+									<circle cx="8" cy="8" r="5" />
+								</svg>
+								{$i18n.t('Rec')}
+							</button>
+						{:else}
+							<button
+								type="button"
+								class="text-xs px-2 py-1 rounded bg-yellow-600 text-white hover:bg-yellow-700 flex items-center gap-1 animate-pulse"
+								on:click={nativeStopRecording}
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3">
+									<rect x="4" y="4" width="8" height="8" rx="1" />
+								</svg>
+								{$i18n.t('Stop')}
+							</button>
+						{/if}
+					</div>
+
+					<!-- Animation Presets List -->
+					{#if animationPresets.length > 0 || loadingAnimations}
+						<div class="text-xs font-medium mt-1">{$i18n.t('Saved Animations')}</div>
+						{#if loadingAnimations}
+							<div class="text-[10px] text-gray-500">{$i18n.t('Loading...')}</div>
+						{:else}
+							<div class="flex flex-col gap-1 max-h-32 overflow-y-auto">
+								{#each animationPresets as preset}
+									<div class="flex items-center gap-1.5 bg-gray-800/50 rounded px-2 py-1.5">
+										<div class="flex-1 min-w-0">
+											<div class="text-xs font-medium truncate">{preset.name}</div>
+											<div class="text-[10px] text-gray-500">{preset.frames.length} frames &middot; {(preset.duration / 1000).toFixed(1)}s</div>
+										</div>
+										<!-- Set as Idle -->
+										<Tooltip content={nativeIdleAnimation?.id === preset.id ? $i18n.t('Active Idle') : $i18n.t('Set as Idle')}>
+											<button
+												type="button"
+												class="p-1 rounded hover:bg-gray-700 {nativeIdleAnimation?.id === preset.id ? 'text-indigo-400' : 'text-gray-400'}"
+												on:click={() => setNativeIdleAnimation(preset)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+													<path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-.5 3a.5.5 0 0 1 1 0v4a.5.5 0 0 1-.276.447l-2 1a.5.5 0 1 1-.448-.894L7.5 7.618V4Z" />
+												</svg>
+											</button>
+										</Tooltip>
+										<!-- Play -->
+										<Tooltip content={$i18n.t('Play')}>
+											<button
+												type="button"
+												class="p-1 rounded hover:bg-gray-700 text-green-400"
+												on:click={() => playNativeAnimation(preset)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+													<path d="M3 3.732a1.5 1.5 0 0 1 2.305-1.265l6.706 4.267a1.5 1.5 0 0 1 0 2.531l-6.706 4.268A1.5 1.5 0 0 1 3 12.267V3.732Z" />
+												</svg>
+											</button>
+										</Tooltip>
+										<!-- Stop -->
+										<Tooltip content={$i18n.t('Stop')}>
+											<button
+												type="button"
+												class="p-1 rounded hover:bg-gray-700 text-yellow-400"
+												on:click={() => stopNativeAnimation()}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+													<rect x="3" y="3" width="10" height="10" rx="1" />
+												</svg>
+											</button>
+										</Tooltip>
+										<!-- Delete -->
+										<Tooltip content={$i18n.t('Delete')}>
+											<button
+												type="button"
+												class="p-1 rounded hover:bg-gray-700 text-red-400"
+												on:click={() => deleteNativeAnimation(preset)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+													<path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5Z" clip-rule="evenodd" />
+												</svg>
+											</button>
+										</Tooltip>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					{/if}
+					
+					<!-- Import VMC Animations -->
+					{#if vmcPresets.length > 0}
+						<div class="text-xs font-medium mt-2">{$i18n.t('Import from VMC')}</div>
+						<div class="text-[10px] text-gray-500">{$i18n.t('Copy animation presets from VSeeFace/VMC to native')}</div>
+						<button
+							type="button"
+							class="w-full text-xs px-2 py-1.5 rounded bg-purple-600 hover:bg-purple-700 text-white flex items-center justify-center gap-1.5"
+							on:click={importAllVMCPresetsToNative}
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+								<path d="M4 2a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6.621a1.5 1.5 0 0 0-.44-1.06L9.94 2.439A1.5 1.5 0 0 0 8.878 2H4Z" />
+								<path d="M8.5 6.25A.75.75 0 0 0 7 6.25v2.19L5.78 7.22a.75.75 0 0 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0l2.5-2.5a.75.75 0 0 0-1.06-1.06L8.5 8.44V6.25Z" />
+							</svg>
+							{$i18n.t('Import All VMC Presets')} ({vmcPresets.length})
+						</button>
+					{/if}
+
+					<!-- Focal Length / FOV -->
+					<div class="text-xs font-medium mt-1">{$i18n.t('Focal Length')}</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Adjusts camera perspective (higher = more telephoto)')}</div>
+					<div class="flex items-center gap-2">
+						<span class="text-[10px] text-gray-400">70</span>
+						<input
+							type="range"
+							min="70"
+							max="240"
+							step="5"
+							class="flex-1"
+							bind:value={nativeFocalLength}
+							on:change={() => saveSettings({ nativeFocalLength })}
+						/>
+						<span class="text-[10px] text-gray-400">240</span>
+						<span class="text-xs text-gray-300 w-10 text-right">{nativeFocalLength}mm</span>
+					</div>
+
+					<!-- Shader / Lighting -->
+					<div class="text-xs font-medium mt-2">{$i18n.t('Lighting')}</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Adjust VRM shader and lighting settings')}</div>
+					
+					<!-- Main Light -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Main Light')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeMainLightIntensity * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeMainLightIntensity * 100} on:input={(e) => { nativeMainLightIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeMainLightIntensity })} />
+					</div>
+					
+					<!-- Ambient Light -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Ambient Light')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeAmbientLightIntensity * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeAmbientLightIntensity * 100} on:input={(e) => { nativeAmbientLightIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeAmbientLightIntensity })} />
+					</div>
+					
+					<!-- Rim Light -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Rim Light')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeRimLightIntensity * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeRimLightIntensity * 100} on:input={(e) => { nativeRimLightIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeRimLightIntensity })} />
+					</div>
+					
+					<!-- Environment Reflections -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Environment')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeEnvironmentIntensity * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeEnvironmentIntensity * 100} on:input={(e) => { nativeEnvironmentIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeEnvironmentIntensity })} />
+					</div>
+					
+					<!-- Exposure -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Exposure')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeToneMappingExposure * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="20" max="200" step="5" class="w-full mt-0.5" value={nativeToneMappingExposure * 100} on:input={(e) => { nativeToneMappingExposure = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeToneMappingExposure })} />
+					</div>
+					
+					<!-- Contrast -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Contrast')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeContrast * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="50" max="150" step="5" class="w-full mt-0.5" value={nativeContrast * 100} on:input={(e) => { nativeContrast = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeContrast })} />
+					</div>
+					
+					<!-- Saturation -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Saturation')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeSaturation * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeSaturation * 100} on:input={(e) => { nativeSaturation = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeSaturation })} />
+					</div>
+					
+					<!-- MToon Highlights Section -->
+					<div class="text-xs font-medium mt-2">{$i18n.t('Highlights (MToon)')}</div>
+					
+					<!-- MatCap Intensity -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Highlight Shine')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeMatcapIntensity * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="100" step="5" class="w-full mt-0.5" value={nativeMatcapIntensity * 100} on:input={(e) => { nativeMatcapIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeMatcapIntensity })} />
+					</div>
+					
+					<!-- Rim Fresnel Power -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Edge Sharpness')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{nativeRimFresnelPower.toFixed(1)}</span>
+						</div>
+						<input type="range" min="1" max="10" step="0.5" class="w-full mt-0.5" value={nativeRimFresnelPower} on:input={(e) => { nativeRimFresnelPower = parseFloat(e.currentTarget.value); }} on:change={() => saveSettings({ nativeRimFresnelPower })} />
+					</div>
+					
+					<!-- Rim Lift -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Edge Glow')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeRimLift * 100).toFixed(0)}%</span>
+						</div>
+						<input type="range" min="0" max="100" step="5" class="w-full mt-0.5" value={nativeRimLift * 100} on:input={(e) => { nativeRimLift = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeRimLift })} />
+					</div>
+					
+					<!-- Rest Pose Toggle -->
+					<div class="flex items-center justify-between mt-1">
+						<div class="text-xs">{$i18n.t('Rest Pose (Arms Down)')}</div>
+						<label class="relative inline-flex items-center cursor-pointer">
+							<input
+								type="checkbox"
+								class="sr-only peer"
+								bind:checked={nativeRestPose}
+								on:change={() => saveSettings({ nativeRestPose })}
+							/>
+							<div class="w-8 h-4 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-cyan-600"></div>
+						</label>
+					</div>
+
+					<!-- Camera Controls -->
+					<div class="text-xs font-medium mt-1">{$i18n.t('Camera Controls')}</div>
+					<div class="flex gap-1.5">
+						<button
+							type="button"
+							class="flex-1 text-xs px-2 py-1.5 rounded bg-cyan-600 hover:bg-cyan-700 text-white flex items-center justify-center gap-1"
+							on:click={() => vrmNativeRef?.autoFitModel()}
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M15 3h6v6" />
+								<path d="M9 21H3v-6" />
+								<path d="M21 3l-7 7" />
+								<path d="M3 21l7-7" />
+							</svg>
+							{$i18n.t('Auto-Fit')}
+						</button>
+						<button
+							type="button"
+							class="flex-1 text-xs px-2 py-1.5 rounded bg-gray-600 hover:bg-gray-700 text-white flex items-center justify-center gap-1"
+							on:click={() => vrmNativeRef?.resetView()}
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+								<path d="M3 3v5h5" />
+							</svg>
+							{$i18n.t('Reset View')}
+						</button>
+					</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Use Alt+drag to rotate, Ctrl+right-drag to pan for large models')}</div>
+
+					<!-- Camera Presets -->
+					<div class="text-xs font-medium mt-2">{$i18n.t('Camera Presets')}</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Save and load camera positions. Last used is auto-saved.')}</div>
+					
+					<!-- Save new preset -->
+					<div class="flex items-center gap-1.5 mt-1">
+						<input
+							type="text"
+							class="flex-1 text-xs px-1.5 py-1 rounded border border-gray-600 bg-transparent min-w-0"
+							placeholder={$i18n.t('Preset name')}
+							bind:value={cameraPresetName}
+						/>
+						<button
+							type="button"
+							class="text-xs px-2 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+							on:click={saveCameraPresetFromCurrent}
+						>
+							{$i18n.t('Save')}
+						</button>
+					</div>
+
+					<!-- Preset list -->
+					{#if cameraPresets.length > 0}
+						<div class="flex flex-col gap-1 mt-1.5 max-h-32 overflow-y-auto">
+							{#each cameraPresets.filter(p => !p.id.startsWith('last:')) as preset}
+								<div class="flex items-center gap-1.5 bg-gray-800/50 rounded px-2 py-1.5">
+									<div class="flex-1 min-w-0">
+										<div class="text-xs font-medium truncate">{preset.name}</div>
+										<div class="text-[10px] text-gray-500">
+											{preset.focalLength}mm &middot; Saved {new Date(preset.timestamp).toLocaleDateString()}
+										</div>
+									</div>
+									<Tooltip content={$i18n.t('Apply')}>
+										<button
+											type="button"
+											class="p-1 rounded hover:bg-gray-700 text-green-400"
+											on:click={() => applyCameraPreset(preset)}
+										>
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+												<path fill-rule="evenodd" d="M12.416 3.376a.75.75 0 0 1 .208 1.04l-5 7.5a.75.75 0 0 1-1.154.114l-3-3a.75.75 0 0 1 1.06-1.06l2.353 2.353 4.493-6.74a.75.75 0 0 1 1.04-.207Z" clip-rule="evenodd" />
+											</svg>
+										</button>
+									</Tooltip>
+									<Tooltip content={$i18n.t('Delete')}>
+										<button
+											type="button"
+											class="p-1 rounded hover:bg-gray-700 text-red-400"
+											on:click={() => deleteCameraPresetById(preset.id)}
+										>
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+												<path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5Z" clip-rule="evenodd" />
+											</svg>
+										</button>
+									</Tooltip>
+								</div>
+							{/each}
+						</div>
+					{:else if !loadingPresets}
+						<div class="text-[10px] text-gray-500 py-1">{$i18n.t('No saved presets yet')}</div>
+					{/if}
+
+					<!-- Status -->
+					{#if nativeStatus}
+						<div class="text-xs text-blue-400 bg-blue-900/30 rounded px-2 py-1">{nativeStatus}</div>
+					{/if}
+				</div>
+				{/if}
+
 				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">{$i18n.t('Appearance')}</div>
 
 				<!-- Background Color -->
@@ -990,6 +1980,8 @@
 					<input type="range" min="0" max="20" step="1" class="w-full mt-1" bind:value={vrmBgBlur} on:change={() => saveSettings({ vrmBgBlur })} />
 				</div>
 
+				<!-- Chroma Key section (only for camera mode) -->
+				{#if vrmRenderMode === 'camera'}
 				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-1">{$i18n.t('Chroma Key')}</div>
 
 				<!-- Chroma Key Toggle -->
@@ -1022,6 +2014,7 @@
 					</div>
 					<input type="range" min="0" max="500" step="1" class="w-full mt-1" bind:value={vrmChromaKeySpill} on:change={() => saveSettings({ vrmChromaKeySpill })} />
 				</div>
+				{/if}
 				{/if}
 
 				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-1">{$i18n.t('Layers')}</div>
@@ -1071,6 +2064,13 @@
 				<!-- ── VMC Animations ────────────────────────────────── -->
 				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-1">{$i18n.t('VMC Animations')}</div>
 
+				{#if vrmRenderMode === 'native'}
+					<!-- Native mode doesn't use VMC -->
+					<div class="text-xs text-gray-500 bg-gray-800/50 rounded px-3 py-2">
+						<div class="font-medium text-gray-400 mb-1">{$i18n.t('Not Available in Native Mode')}</div>
+						<p>{$i18n.t('VMC animations control VSeeFace via OSC. In native mode, use the face tracking and recording controls above instead.')}</p>
+					</div>
+				{:else}
 				<!-- Status bar -->
 				{#if vmcStatus}
 					<div class="text-xs text-blue-400 bg-blue-900/30 rounded px-2 py-1 break-words">{vmcStatus}</div>
@@ -1258,6 +2258,7 @@
 						{vmcFilterInstalled ? $i18n.t('Filter Installed ✓') : $i18n.t('Install Emotion Filter')}
 					</button>
 				</div>
+				{/if}
 			</div>
 		</div>
 	{/if}

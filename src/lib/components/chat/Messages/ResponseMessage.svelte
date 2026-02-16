@@ -350,6 +350,11 @@
 		try {
 			speechSynthesis.cancel();
 			$audioQueue.stop();
+			
+			// Signal backend audio router to stop playback and close VRM mouth
+			fetch('http://localhost:8765/stop', { method: 'POST' }).catch(() => {
+				// Silently ignore if audio router is unavailable
+			});
 		} catch {}
 
 		speaking = false;
