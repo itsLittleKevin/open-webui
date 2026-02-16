@@ -93,6 +93,10 @@ export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
 export const showVrmAvatar = writable(false);
 
+// VMC animation trigger store - components can subscribe to play animations
+export const vmcAnimationTrigger: Writable<{ preset: string; timestamp: number } | null> =
+	writable(null);
+
 export const artifactCode = writable(null);
 export const artifactContents = writable(null);
 

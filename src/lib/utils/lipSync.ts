@@ -43,9 +43,21 @@ export class LipSyncEngine {
 	private timeData: Uint8Array<ArrayBuffer> | null = null;
 	private sourceNode: MediaElementAudioSourceNode | AudioBufferSourceNode | null = null;
 	
+	// Cache for MediaElementAudioSourceNodes - can only create one per audio element
+	private mediaSourceCache = new WeakMap<HTMLAudioElement, MediaElementAudioSourceNode>();
+	private connectedAudioElement: HTMLAudioElement | null = null;
+	
 	private currentViseme: Viseme = 'neutral';
 	private currentMouthOpen = 0;
 	private currentVolume = 0;
+	
+	// Smooth viseme blending - track weights for each vowel
+	private visemeWeights: Record<Viseme, number> = {
+		A: 0, I: 0, U: 0, E: 0, O: 0, neutral: 1
+	};
+	private lastVisemeChangeTime = 0;
+	private visemeChangeCooldownMs = 80;  // Minimum ms between viseme changes
+	private visemeBlendSpeed = 0.25;  // How fast to blend towards target viseme (0-1)
 	
 	private smoothing: number;
 	private volumeThreshold: number;
@@ -56,9 +68,9 @@ export class LipSyncEngine {
 	private isRunning = false;
 
 	constructor(options: LipSyncOptions = {}) {
-		this.smoothing = options.smoothing ?? 0.7;
-		this.volumeThreshold = options.volumeThreshold ?? 0.05;
-		this.sensitivity = options.sensitivity ?? 1.5;
+		this.smoothing = options.smoothing ?? 0.6;  // Higher = smoother transitions
+		this.volumeThreshold = options.volumeThreshold ?? 0.03;  // Sensitive to quiet audio
+		this.sensitivity = options.sensitivity ?? 3.5;  // Bigger mouth movements
 	}
 
 	/**
@@ -94,13 +106,33 @@ export class LipSyncEngine {
 			throw new Error('Audio context not initialized');
 		}
 
-		// Disconnect existing source
-		this.disconnectSource();
+		// If we're already connected to this audio element, just ensure analyser is connected
+		if (this.connectedAudioElement === audioElement && this.mediaSourceCache.has(audioElement)) {
+			const cachedSource = this.mediaSourceCache.get(audioElement)!;
+			this.sourceNode = cachedSource;
+			// Ensure connections are still valid (they persist)
+			return;
+		}
 
-		// Create source from audio element
-		this.sourceNode = this.audioContext.createMediaElementSource(audioElement);
-		this.sourceNode.connect(this.analyser);
-		this.analyser.connect(this.audioContext.destination);
+		// Disconnect existing source if switching elements
+		if (this.connectedAudioElement !== audioElement) {
+			this.disconnectSource();
+		}
+
+		// Check if we already have a cached source for this audio element
+		let source = this.mediaSourceCache.get(audioElement);
+		
+		if (!source) {
+			// Create source from audio element - this can only be done ONCE per element
+			source = this.audioContext.createMediaElementSource(audioElement);
+			this.mediaSourceCache.set(audioElement, source);
+			// Connect source -> analyser -> destination (permanent connection)
+			source.connect(this.analyser);
+			this.analyser.connect(this.audioContext.destination);
+		}
+		
+		this.sourceNode = source;
+		this.connectedAudioElement = audioElement;
 	}
 
 	/**
@@ -161,10 +193,14 @@ export class LipSyncEngine {
 
 	private disconnectSource(): void {
 		if (this.sourceNode) {
-			try {
-				this.sourceNode.disconnect();
-			} catch {
-				// Ignore disconnect errors
+			// Don't disconnect MediaElementAudioSourceNodes - they're cached and reused
+			// Only disconnect AudioBufferSourceNodes and MediaStreamAudioSourceNodes
+			if (!(this.sourceNode instanceof MediaElementAudioSourceNode)) {
+				try {
+					this.sourceNode.disconnect();
+				} catch {
+					// Ignore disconnect errors
+				}
 			}
 			this.sourceNode = null;
 		}
@@ -219,21 +255,34 @@ export class LipSyncEngine {
 			// Smooth volume transition
 			this.currentVolume = this.currentVolume + (volume - this.currentVolume) * (1 - this.smoothing);
 
+			const now = performance.now();
+
 			if (this.currentVolume > this.volumeThreshold) {
-				// Detect viseme from frequency data
-				const detectedViseme = this.detectViseme();
-				
-				// Smooth viseme transition (only change if confident)
-				if (detectedViseme !== this.currentViseme) {
-					this.currentViseme = detectedViseme;
+				// Detect viseme from frequency data (with cooldown to prevent rapid switching)
+				if (now - this.lastVisemeChangeTime > this.visemeChangeCooldownMs) {
+					const detectedViseme = this.detectViseme();
+					if (detectedViseme !== this.currentViseme) {
+						this.currentViseme = detectedViseme;
+						this.lastVisemeChangeTime = now;
+					}
+				}
+
+				// Smoothly blend viseme weights towards current viseme
+				for (const v of Object.keys(this.visemeWeights) as Viseme[]) {
+					const target = v === this.currentViseme ? 1 : 0;
+					this.visemeWeights[v] += (target - this.visemeWeights[v]) * this.visemeBlendSpeed;
 				}
 
 				// Mouth openness based on volume
 				const targetMouthOpen = Math.min(1, this.currentVolume * this.sensitivity);
 				this.currentMouthOpen = this.currentMouthOpen + (targetMouthOpen - this.currentMouthOpen) * (1 - this.smoothing);
 			} else {
-				// Silence - close mouth
+				// Silence - blend towards neutral and close mouth
 				this.currentViseme = 'neutral';
+				for (const v of Object.keys(this.visemeWeights) as Viseme[]) {
+					const target = v === 'neutral' ? 1 : 0;
+					this.visemeWeights[v] += (target - this.visemeWeights[v]) * this.visemeBlendSpeed;
+				}
 				this.currentMouthOpen = this.currentMouthOpen * this.smoothing;
 			}
 

@@ -85,6 +85,7 @@
 	let isPlayingAnimation = false;
 	let animationCancelRequested = false;
 	let currentAnimationResolve: (() => void) | null = null;
+	let idleWasPlayingBeforeAnimation = false;  // Track if we should resume idle after animation
 
 	// Background color conversion
 	$: bgColorNum = parseInt(backgroundColor.replace('#', ''), 16);
@@ -117,6 +118,21 @@
 		loadProgress = event.detail.percent;
 	}
 
+	// ── Reactive Idle Animation ────────────────────────────────────────
+	// Restart idle animation when the idleAnimation prop changes
+	let prevIdleAnimationName: string | null = null;
+
+	$: if (vrm && vrmRef && idleAnimation) {
+		if (idleAnimation.name !== prevIdleAnimationName) {
+			stopIdleAnimation();
+			startIdleAnimation();
+			prevIdleAnimationName = idleAnimation.name;
+		}
+	} else if (vrm && !idleAnimation && prevIdleAnimationName) {
+		stopIdleAnimation();
+		prevIdleAnimationName = null;
+	}
+
 	// ── Lip Sync ───────────────────────────────────────────────────────
 
 	/**
@@ -130,7 +146,7 @@
 			lipSyncEngine.start(handleLipSyncUpdate);
 			lipSyncActive = true;
 		} catch (e) {
-			console.error('Failed to start lip sync:', e);
+			console.error('[lip-sync] Failed to start lip sync:', e);
 		}
 	}
 
@@ -161,9 +177,9 @@
 		currentViseme = 'neutral';
 		currentVolume = 0;
 		
-		// Reset mouth
+		// Clear lip sync layer so base layer shows through
 		if (vrmRef && vrm) {
-			vrmRef.setViseme('neutral', 0);
+			vrmRef.clearLipSync();
 		}
 	}
 
@@ -337,20 +353,20 @@
 				vrmRef.setEyeRotation('right', (frame as any).rightEyeRotation);
 			}
 
-			// Apply all blendshapes (facial expressions)
+			// Apply all blendshapes (facial expressions) - use BASE layer for idle
 			// Handle both blendshapes (AnimationPreset) and blendShapes (RecordedFrame)
 			const shapes = (frame as any).blendshapes ?? (frame as any).blendShapes;
 			if (shapes) {
 				for (const [name, value] of Object.entries(shapes)) {
-					vrmRef.setExpression(name, value as number);
+					vrmRef.setExpressionBase(name, value as number);
 				}
 			} else {
 				// Fallback to explicit blink values
 				if (frame.leftEyeBlink !== undefined) {
-					vrmRef.setExpression('blinkLeft', frame.leftEyeBlink);
+					vrmRef.setExpressionBase('blinkLeft', frame.leftEyeBlink);
 				}
 				if (frame.rightEyeBlink !== undefined) {
-					vrmRef.setExpression('blinkRight', frame.rightEyeBlink);
+					vrmRef.setExpressionBase('blinkRight', frame.rightEyeBlink);
 				}
 			}
 
@@ -386,6 +402,12 @@
 				currentAnimationResolve();
 			}
 
+			// Pause idle animation to avoid bone conflicts (nod/shake_head use head bone)
+			idleWasPlayingBeforeAnimation = idleAnimationTimer !== 0;
+			if (idleWasPlayingBeforeAnimation) {
+				stopIdleAnimation();
+			}
+
 			isPlayingAnimation = true;
 			animationCancelRequested = false;
 			currentAnimationResolve = resolve;
@@ -394,10 +416,19 @@
 			const frameInterval = 1000 / animation.fps;
 
 			const playFrame = () => {
-				// Check for cancellation
+				// Check for cancellation or completion
 				if (animationCancelRequested || !vrm || !vrmRef || frameIndex >= animation.frames.length) {
 					isPlayingAnimation = false;
 					currentAnimationResolve = null;
+					// Clear overlay layer so base layer shows through cleanly
+					if (vrmRef) {
+						vrmRef.clearExpressionOverlay();
+					}
+					// Resume idle animation if it was playing before
+					if (idleWasPlayingBeforeAnimation && idleAnimation) {
+						startIdleAnimation();
+						idleWasPlayingBeforeAnimation = false;
+					}
 					resolve();
 					return;
 				}
@@ -422,20 +453,20 @@
 					vrmRef.setEyeRotation('right', (frame as any).rightEyeRotation);
 				}
 
-				// Apply all blendshapes (facial expressions)
+				// Apply all blendshapes (facial expressions) - use OVERLAY layer for triggered animations
 				// Handle both blendshapes (AnimationPreset) and blendShapes (RecordedFrame)
 				const shapes = (frame as any).blendshapes ?? (frame as any).blendShapes;
 				if (shapes) {
 					for (const [name, value] of Object.entries(shapes)) {
-						vrmRef.setExpression(name, value as number);
+						vrmRef.setExpressionOverlay(name, value as number);
 					}
 				} else {
 					// Fallback to explicit blink values
 					if (frame.leftEyeBlink !== undefined) {
-						vrmRef.setExpression('blinkLeft', frame.leftEyeBlink);
+						vrmRef.setExpressionOverlay('blinkLeft', frame.leftEyeBlink);
 					}
 					if (frame.rightEyeBlink !== undefined) {
-						vrmRef.setExpression('blinkRight', frame.rightEyeBlink);
+						vrmRef.setExpressionOverlay('blinkRight', frame.rightEyeBlink);
 					}
 				}
 
@@ -459,14 +490,15 @@
 			}
 			isPlayingAnimation = false;
 			
-			// Reset expressions to neutral
+			// Clear overlay layer so base layer shows through
 			if (vrmRef) {
-				vrmRef.setExpression('happy', 0);
-				vrmRef.setExpression('angry', 0);
-				vrmRef.setExpression('sad', 0);
-				vrmRef.setExpression('surprised', 0);
-				vrmRef.setExpression('blinkLeft', 0);
-				vrmRef.setExpression('blinkRight', 0);
+				vrmRef.clearExpressionOverlay();
+			}
+			
+			// Resume idle animation if it was playing before
+			if (idleWasPlayingBeforeAnimation && idleAnimation) {
+				startIdleAnimation();
+				idleWasPlayingBeforeAnimation = false;
 			}
 		}
 	}
@@ -483,6 +515,30 @@
 	export function setExpression(name: string, weight: number = 1.0) {
 		if (vrmRef) {
 			vrmRef.setExpression(name, weight);
+		}
+	}
+
+	export function setExpressionBase(name: string, weight: number = 1.0) {
+		if (vrmRef) {
+			vrmRef.setExpressionBase(name, weight);
+		}
+	}
+
+	export function setExpressionOverlay(name: string, weight: number = 1.0) {
+		if (vrmRef) {
+			vrmRef.setExpressionOverlay(name, weight);
+		}
+	}
+
+	export function clearExpressionOverlay() {
+		if (vrmRef) {
+			vrmRef.clearExpressionOverlay();
+		}
+	}
+
+	export function clearLipSync() {
+		if (vrmRef) {
+			vrmRef.clearLipSync();
 		}
 	}
 

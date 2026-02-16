@@ -22,9 +22,13 @@
 		settings,
 		temporaryChatEnabled,
 		TTSWorker,
-		user
+		user,
+		vmcAnimationTrigger,
+		showVrmAvatar
 	} from '$lib/stores';
 	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
+	import { playPreset } from '$lib/apis/vmc';
+	import { createStreamingSegmentClassifier, DEFAULT_INTENT_MODEL, type GestureType, type ExpressionType } from '$lib/utils/intentClassifier';
 	import { imageGenerations } from '$lib/apis/images';
 	import {
 		copyToClipboard as _copyToClipboard,
@@ -182,6 +186,76 @@
 	let streamingTTSPending: Promise<string | null>[] = [];
 	let streamingTTSEnqueueRunning = false;
 
+	// --- LLM-based Animation Classifier: trigger VRM animations based on semantic intent ---
+	// Analyzes text segments and triggers max 1 gesture + 1 expression per segment
+	
+	// Helper to trigger animation (used by both gesture and expression callbacks)
+	const triggerAnimation = async (preset: string, type: 'gesture' | 'expression') => {
+		if (!$showVrmAvatar) return;
+		
+		console.debug(`[animation-classifier] ${type}:`, preset);
+		
+		// Update store so VrmAvatarOverlay can react (for native VRM mode)
+		vmcAnimationTrigger.set({ preset, timestamp: Date.now() });
+		
+		// Also try to play via VMC API (for VSeeFace mode)
+		try {
+			await playPreset(localStorage.token, preset, false);
+		} catch (e) {
+			// VMC might not be running, that's okay - the store update handles native mode
+			console.debug('[animation-classifier] VMC play failed (native mode may handle):', e);
+		}
+	};
+	
+	// Get animate model ID - prefer settings override, fall back to qwen2.5:1.5b
+	const getAnimationClassifierModelId = (): string => {
+		// Allow user to configure a fast model for classification in settings
+		const classifierModel = $settings?.vrmAnimationClassifierModel;
+		if (classifierModel) return classifierModel;
+		// Fall back to default fast model (qwen2.5:1.5b)
+		return DEFAULT_INTENT_MODEL;
+	};
+	
+	// Segment classifier instance (lazy initialized when model is available)
+	let segmentClassifier: ReturnType<typeof createStreamingSegmentClassifier> | null = null;
+	
+	const getOrCreateSegmentClassifier = () => {
+		const modelId = getAnimationClassifierModelId();
+		if (!modelId) return null;
+		
+		if (!segmentClassifier) {
+			segmentClassifier = createStreamingSegmentClassifier(
+				localStorage.token,
+				modelId,
+				(gesture) => triggerAnimation(gesture, 'gesture'),
+				(expression) => triggerAnimation(expression, 'expression'),
+				{ gestureCooldownMs: 6000, expressionCooldownMs: 5000 }
+			);
+		}
+		return segmentClassifier;
+	};
+	
+	// Legacy keyword interceptor interface for backwards compatibility
+	const animationInterceptor = {
+		intercept(sentence: string) {
+			const classifier = getOrCreateSegmentClassifier();
+			if (classifier) {
+				classifier.feed(sentence);
+			}
+		},
+		reset() {
+			if (segmentClassifier) {
+				segmentClassifier.reset();
+			}
+			segmentClassifier = null; // Force re-creation with potentially updated model
+		},
+		async flush() {
+			if (segmentClassifier) {
+				await segmentClassifier.flush();
+			}
+		}
+	};
+
 	// Helper: get voice ID (shared between speak() and streaming TTS)
 	const getVoiceId = () => {
 		if (model?.info?.meta?.tts?.voice) {
@@ -261,6 +335,8 @@
 		if (!msg.done && !streamingTTSActive) {
 			autoTTSTriggered = false;
 			streamingTTSSentences = [];
+			_animationProcessedSentences = []; // Reset animation tracking too
+			animationInterceptor.reset(); // Reset animation interceptor state for new response
 		}
 
 		// Bootstrap: activate streaming TTS on first real content
@@ -308,6 +384,8 @@
 				console.debug('[streaming-tts] sentence', i, completeParts[i].substring(0, 40));
 				streamingTTSSentences.push(completeParts[i]);
 				streamingTTSFetch(completeParts[i]);
+				// Check for emotional keywords and trigger VRM animations
+				animationInterceptor.intercept(completeParts[i]);
 			}
 		} else if (msg.done && _prevStreamingDone !== true) {
 			// Message just finished — send ALL remaining parts (including the last partial)
@@ -315,7 +393,11 @@
 				console.debug('[streaming-tts] final', i, allParts[i].substring(0, 40));
 				streamingTTSSentences.push(allParts[i]);
 				streamingTTSFetch(allParts[i]);
+				// Check for emotional keywords and trigger VRM animations
+				animationInterceptor.intercept(allParts[i]);
 			}
+			// Flush any pending segment classification
+			animationInterceptor.flush();
 		}
 
 		_prevStreamingDone = msg.done;
@@ -323,6 +405,62 @@
 
 	// Single reactive call — guaranteed to fire on every `message` reassignment
 	$: processStreamingTTS(message);
+
+	// --- Animation Interceptor for Text Streaming (without TTS) ---
+	// Triggers VRM animations during text streaming even when TTS is not active
+	let _animationProcessedSentences: string[] = [];
+	let _prevAnimationDone: boolean | undefined;
+
+	function processStreamingAnimation(msg: typeof message) {
+		if (!msg) return;
+		
+		// Skip if TTS streaming is active (it handles animations already)
+		if (streamingTTSActive) return;
+		
+		// Skip if VRM avatar is not visible
+		if (!$showVrmAvatar) return;
+
+		const strippedContent = removeAllDetails(msg.content ?? '');
+		
+		// Reset on new streaming message
+		if (!msg.done && _animationProcessedSentences.length === 0 && strippedContent.length < 3) {
+			animationInterceptor.reset();
+			_animationProcessedSentences = [];
+		}
+
+		if (!msg.content || strippedContent.length < 3) return;
+
+		const allParts = getMessageContentParts(
+			strippedContent,
+			$config?.audio?.tts?.split_on ?? 'punctuation'
+		);
+
+		if (!msg.done) {
+			// Streaming: process only fully completed sentences (skip last — may be partial)
+			const completeParts = allParts.slice(0, -1);
+			for (let i = _animationProcessedSentences.length; i < completeParts.length; i++) {
+				console.debug('[animation-stream] sentence', i, completeParts[i].substring(0, 40));
+				_animationProcessedSentences.push(completeParts[i]);
+				animationInterceptor.intercept(completeParts[i]);
+			}
+		} else if (msg.done && _prevAnimationDone !== true) {
+			// Message just finished — process ALL remaining parts
+			for (let i = _animationProcessedSentences.length; i < allParts.length; i++) {
+				console.debug('[animation-stream] final', i, allParts[i].substring(0, 40));
+				_animationProcessedSentences.push(allParts[i]);
+				animationInterceptor.intercept(allParts[i]);
+			}
+			// Flush any pending segment classification
+			animationInterceptor.flush();
+			// Reset state for next response
+			_animationProcessedSentences = [];
+		}
+
+		_prevAnimationDone = msg.done;
+	}
+
+	// Process animations during text streaming (separate from TTS)
+	$: processStreamingAnimation(message);
 
 	// Fallback: if streaming TTS wasn't active (e.g. not voice input), use original behavior
 	$: if (message?.done && !autoTTSTriggered && !speaking && !loadingSpeech && history?.messages?.[message?.parentId]?.isVoiceInput && $config?.audio?.tts?.engine !== '') {

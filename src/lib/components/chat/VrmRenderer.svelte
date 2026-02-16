@@ -88,6 +88,14 @@
 	let targetMouthOpen = 0;
 	let currentViseme = '';
 
+	// Expression layering for additive blending
+	// Base layer = idle animation, Overlay layer = expression animations (smile, etc.)
+	// Lip sync layer = mouth shapes from TTS audio
+	let expressionBaseLayer: Record<string, number> = {};
+	let expressionOverlayLayer: Record<string, number> = {};
+	let expressionLipSyncLayer: Record<string, number> = {};
+	let useAdditiveBlending = true;
+
 	// VRM blend shape names (VRM1.0 uses these expression names)
 	const VISEME_MAP: Record<string, string> = {
 		'A': 'aa',
@@ -97,6 +105,11 @@
 		'O': 'oh',
 		'neutral': 'neutral'
 	};
+	
+	// Viseme blending settings
+	const VISEME_BLEND_SPEED = 0.3;  // 0-1, how fast to blend towards target viseme
+	let visemeTargetWeights: Record<string, number> = {};
+	let visemeCurrentWeights: Record<string, number> = {};
 
 	// Expression name mapping: various input names → VRM expression names
 	// VRM 1.0 preset names: happy, angry, sad, relaxed, surprised
@@ -794,8 +807,77 @@
 		}
 	}
 
-	export function setExpression(name: string, weight: number = 1.0) {
+	/**
+	 * Set expression on the base layer (for idle animations)
+	 * When additive blending is enabled, this layer is combined with overlay.
+	 */
+	export function setExpressionBase(name: string, weight: number = 1.0) {
+		const normalizedName = normalizeExpressionName(name);
+		if (normalizedName) {
+			expressionBaseLayer[normalizedName] = weight;
+			if (useAdditiveBlending) {
+				applyBlendedExpressions();
+			} else {
+				applyExpressionDirect(normalizedName, weight);
+			}
+		}
+	}
+
+	/**
+	 * Set expression on the overlay layer (for triggered expressions like smile)
+	 * These are ADDED on top of base layer values.
+	 */
+	export function setExpressionOverlay(name: string, weight: number = 1.0) {
+		const normalizedName = normalizeExpressionName(name);
+		if (normalizedName) {
+			expressionOverlayLayer[normalizedName] = weight;
+			if (useAdditiveBlending) {
+				applyBlendedExpressions();
+			} else {
+				applyExpressionDirect(normalizedName, weight);
+			}
+		}
+	}
+
+	/**
+	 * Clear the overlay layer (after expression animation ends)
+	 */
+	export function clearExpressionOverlay() {
+		expressionOverlayLayer = {};
+		if (useAdditiveBlending) {
+			applyBlendedExpressions();
+		}
+	}
+
+	/**
+	 * Apply blended expressions to VRM (base + overlay + lipSync)
+	 */
+	function applyBlendedExpressions() {
 		if (!vrm?.expressionManager) return;
+
+		// Collect all unique expression names from all layers
+		const allNames = new Set([
+			...Object.keys(expressionBaseLayer),
+			...Object.keys(expressionOverlayLayer),
+			...Object.keys(expressionLipSyncLayer)
+		]);
+
+		for (const exprName of allNames) {
+			const baseValue = expressionBaseLayer[exprName] ?? 0;
+			const overlayValue = expressionOverlayLayer[exprName] ?? 0;
+			const lipSyncValue = expressionLipSyncLayer[exprName] ?? 0;
+			// Additive blend: clamp to 0-1
+			const blendedValue = Math.min(1, Math.max(0, baseValue + overlayValue + lipSyncValue));
+			
+			applyExpressionDirect(exprName, blendedValue);
+		}
+	}
+
+	/**
+	 * Normalize expression name to VRM-compatible name
+	 */
+	function normalizeExpressionName(name: string): string | null {
+		if (!vrm?.expressionManager) return null;
 
 		const nameLower = name.toLowerCase();
 		
@@ -814,23 +896,38 @@
 		const presetName = VRMExpressionPresetName[name as keyof typeof VRMExpressionPresetName];
 		if (presetName) expressionNames.push(presetName);
 		
-		// Try each expression name until one works
-		// VRM expressionManager.setValue() doesn't throw - we need to check if expression exists
+		// Find first matching expression
 		for (const exprName of expressionNames) {
 			try {
-				// Check if the expression exists using getExpression
 				const expression = vrm.expressionManager.getExpression(exprName);
 				if (expression) {
-					vrm.expressionManager.setValue(exprName, weight);
-					return; // Success
+					return exprName;
 				}
 			} catch {
 				// Try next name
 			}
 		}
-		
-		// Debug: log unmapped expressions
-		console.warn('[VRM] Expression not found:', name, '| tried:', expressionNames.join(', '));
+		return null;
+	}
+
+	/**
+	 * Apply expression value directly to VRM
+	 */
+	function applyExpressionDirect(exprName: string, weight: number) {
+		if (!vrm?.expressionManager) return;
+		try {
+			vrm.expressionManager.setValue(exprName, weight);
+		} catch {
+			// Ignore errors
+		}
+	}
+
+	/**
+	 * Set expression (default: uses base layer for backward compatibility)
+	 */
+	export function setExpression(name: string, weight: number = 1.0) {
+		// Default to base layer for backward compatibility
+		setExpressionBase(name, weight);
 	}
 
 	/**
@@ -886,28 +983,65 @@
 	export function setViseme(viseme: string, weight: number = 1.0) {
 		if (!vrm?.expressionManager) return;
 
-		// Reset all visemes first
-		for (const v of Object.values(VISEME_MAP)) {
-			try {
-				vrm.expressionManager.setValue(v, 0);
-			} catch {
-				// Ignore missing expressions
-			}
-		}
-
-		// Set the target viseme
+		// Map viseme to VRM expression name
 		const mappedViseme = VISEME_MAP[viseme] || viseme.toLowerCase();
 		currentViseme = mappedViseme;
 		
-		try {
-			vrm.expressionManager.setValue(mappedViseme, weight);
-		} catch {
-			// Fallback to 'aa' for basic mouth open
-			try {
-				vrm.expressionManager.setValue('aa', weight);
-			} catch {
-				// No mouth expression available
+		// Set target weights: target viseme gets the weight, others get 0
+		for (const [key, vrmName] of Object.entries(VISEME_MAP)) {
+			const normalizedName = normalizeExpressionName(vrmName);
+			if (normalizedName) {
+				if (vrmName === mappedViseme && mappedViseme !== 'neutral') {
+					visemeTargetWeights[normalizedName] = weight;
+				} else {
+					visemeTargetWeights[normalizedName] = 0;
+				}
+				// Initialize current weights if needed
+				if (visemeCurrentWeights[normalizedName] === undefined) {
+					visemeCurrentWeights[normalizedName] = 0;
+				}
 			}
+		}
+		
+		// Fallback to 'aa' if no specific viseme matched
+		if (mappedViseme && mappedViseme !== 'neutral') {
+			const normalizedName = normalizeExpressionName(mappedViseme);
+			if (!normalizedName) {
+				const aaName = normalizeExpressionName('aa');
+				if (aaName) {
+					visemeTargetWeights[aaName] = weight;
+					if (visemeCurrentWeights[aaName] === undefined) {
+						visemeCurrentWeights[aaName] = 0;
+					}
+				}
+			}
+		}
+		
+		// Smoothly interpolate current weights towards targets
+		for (const name of Object.keys(visemeTargetWeights)) {
+			const target = visemeTargetWeights[name] ?? 0;
+			const current = visemeCurrentWeights[name] ?? 0;
+			visemeCurrentWeights[name] = current + (target - current) * VISEME_BLEND_SPEED;
+			
+			// Apply to lip sync layer
+			expressionLipSyncLayer[name] = visemeCurrentWeights[name];
+		}
+
+		// Apply blended result
+		if (useAdditiveBlending) {
+			applyBlendedExpressions();
+		}
+	}
+
+	/**
+	 * Clear lip sync layer (called when TTS stops)
+	 */
+	export function clearLipSync() {
+		expressionLipSyncLayer = {};
+		visemeTargetWeights = {};
+		visemeCurrentWeights = {};
+		if (useAdditiveBlending) {
+			applyBlendedExpressions();
 		}
 	}
 
@@ -983,12 +1117,14 @@
 			vrm.update(deltaTime);
 		}
 
-		// Smooth mouth animation
+		// Smooth mouth animation (legacy - now handled by lip sync layer)
+		// Only apply if NOT using additive blending to avoid conflicts
 		const smoothFactor = 1 - Math.pow(0.001, deltaTime);
 		currentMouthOpen += (targetMouthOpen - currentMouthOpen) * smoothFactor;
 
-		// Apply mouth open to viseme
-		if (vrm?.expressionManager && currentMouthOpen > 0.01) {
+		// When using additive blending, mouth is handled by expressionLipSyncLayer
+		// Only directly apply if additive blending is disabled
+		if (!useAdditiveBlending && vrm?.expressionManager && currentMouthOpen > 0.01) {
 			try {
 				vrm.expressionManager.setValue('aa', currentMouthOpen);
 			} catch {

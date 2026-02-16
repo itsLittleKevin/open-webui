@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick, getContext } from 'svelte';
-	import { showVrmAvatar, settings } from '$lib/stores';
+	import { showVrmAvatar, settings, vmcAnimationTrigger } from '$lib/stores';
 	import { updateUserSettings } from '$lib/apis/users';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -137,6 +137,10 @@
 	
 	// Rest pose - arms down instead of T-pose
 	let nativeRestPose = true;
+
+	// Lip sync integration with global TTS audioElement
+	let ttsAudioElement: HTMLAudioElement | null = null;
+	let lipSyncAttached = false;
 
 	// Camera presets
 	let cameraPresets: CameraPreset[] = [];
@@ -1174,6 +1178,18 @@
 		loadStoredVRM();
 	}
 
+	// Map VMC preset names to native animation preset names
+	// (VMC presets have names like "smile", native imports have "VMC: smile")
+	function findNativeAnimationByVMCPreset(vmcPresetName: string): AnimationPreset | null {
+		// First try exact match with "VMC: " prefix
+		const vmcName = `VMC: ${vmcPresetName}`;
+		const found = animationPresets.find(p => p.name === vmcName || p.name.toLowerCase() === vmcPresetName.toLowerCase());
+		return found || null;
+	}
+
+	// Handle animation triggers from the interceptor (for native VRM mode)
+	let animTriggerUnsubscribe: (() => void) | null = null;
+
 	onMount(async () => {
 		await enumerateDevices();
 		// Default position: bottom-right
@@ -1189,11 +1205,79 @@
 		if (vrmRenderMode === 'native') {
 			await loadStoredVRM();
 		}
+
+		// Subscribe to animation triggers from the interceptor
+		animTriggerUnsubscribe = vmcAnimationTrigger.subscribe(async (trigger) => {
+			if (!trigger || vrmRenderMode !== 'native' || !vrmNativeRef) return;
+
+			// Don't trigger if an animation is already playing
+			if (vrmNativeRef.getIsPlayingAnimation()) {
+				console.debug('[vmc-animation] Skipping - animation already playing');
+				return;
+			}
+
+			// Try to find a matching native animation preset
+			const nativePreset = findNativeAnimationByVMCPreset(trigger.preset);
+			if (nativePreset) {
+				console.debug('[vmc-animation] Playing native animation:', nativePreset.name, 'duration:', nativePreset.duration);
+				await playNativeAnimation(nativePreset);
+			} else {
+				console.debug('[vmc-animation] No native animation found for:', trigger.preset, '- available:', animationPresets.map(p => p.name));
+			}
+		});
+
+		// Connect lip sync to the global TTS audio element
+		// The audio element might not exist immediately if VrmAvatarOverlay mounts before Chat.svelte
+		const connectAudioElement = () => {
+			ttsAudioElement = document.getElementById('audioElement') as HTMLAudioElement | null;
+			if (ttsAudioElement) {
+				ttsAudioElement.addEventListener('play', onTTSPlay);
+				ttsAudioElement.addEventListener('ended', onTTSEnded);
+				ttsAudioElement.addEventListener('pause', onTTSEnded);
+				lipSyncAttached = true;
+				return true;
+			}
+			return false;
+		};
+
+		if (!connectAudioElement()) {
+			// Retry a few times with delay
+			let retries = 0;
+			const maxRetries = 10;
+			const retryInterval = setInterval(() => {
+				retries++;
+				if (connectAudioElement() || retries >= maxRetries) {
+					clearInterval(retryInterval);
+				}
+			}, 500);
+		}
 	});
+
+	// TTS lip sync handlers
+	function onTTSPlay() {
+		if (vrmRenderMode === 'native' && vrmNativeRef && ttsAudioElement) {
+			vrmNativeRef.startLipSync(ttsAudioElement);
+		}
+	}
+
+	function onTTSEnded() {
+		if (vrmRenderMode === 'native' && vrmNativeRef) {
+			vrmNativeRef.stopLipSync();
+		}
+	}
 
 	onDestroy(() => {
 		stopChromaLoop();
 		stopStream();
+		if (animTriggerUnsubscribe) {
+			animTriggerUnsubscribe();
+		}
+		// Clean up lip sync listeners
+		if (ttsAudioElement && lipSyncAttached) {
+			ttsAudioElement.removeEventListener('play', onTTSPlay);
+			ttsAudioElement.removeEventListener('ended', onTTSEnded);
+			ttsAudioElement.removeEventListener('pause', onTTSEnded);
+		}
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('mousemove', onMouseMove);
 			window.removeEventListener('mouseup', onMouseUp);
@@ -1593,6 +1677,27 @@
 							</button>
 						{/if}
 					</div>
+
+					<!-- Active Idle Status -->
+					{#if nativeIdleAnimation}
+						<div class="flex items-center gap-2 bg-indigo-900/50 rounded px-2 py-1.5 mt-1">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5 text-indigo-400">
+								<path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-.5 3a.5.5 0 0 1 1 0v4a.5.5 0 0 1-.276.447l-2 1a.5.5 0 1 1-.448-.894L7.5 7.618V4Z" />
+							</svg>
+							<span class="text-xs text-indigo-200 flex-1 truncate">{$i18n.t('Idle')}: {nativeIdleAnimation.name}</span>
+							<Tooltip content={$i18n.t('Stop Idle')}>
+								<button
+									type="button"
+									class="p-1 rounded hover:bg-gray-700 text-red-400"
+									on:click={() => { nativeIdleAnimation = null; nativeStatus = 'Idle animation stopped'; }}
+								>
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+										<path fill-rule="evenodd" d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm2.78-4.22a.75.75 0 0 1-1.06 0L8 9.06l-1.72 1.72a.75.75 0 1 1-1.06-1.06L6.94 8 5.22 6.28a.75.75 0 0 1 1.06-1.06L8 6.94l1.72-1.72a.75.75 0 1 1 1.06 1.06L9.06 8l1.72 1.72a.75.75 0 0 1 0 1.06Z" clip-rule="evenodd" />
+									</svg>
+								</button>
+							</Tooltip>
+						</div>
+					{/if}
 
 					<!-- Animation Presets List -->
 					{#if animationPresets.length > 0 || loadingAnimations}
