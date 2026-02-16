@@ -23,7 +23,7 @@
 	export let fillLightIntensity = 0.3;
 	export let rimLightColor = 0xaaccff;
 	export let rimLightIntensity = 0.5;
-	export let environmentIntensity = 0.6;
+	export let gammaCorrection = 1.0;
 	export let toneMappingExposure = 1.0;
 	
 	// Post-processing style adjustments (CSS filters)
@@ -182,7 +182,7 @@
 	$: if (mainLight) mainLight.intensity = mainLightIntensity;
 	$: if (ambientLight) ambientLight.intensity = ambientLightIntensity;
 	$: if (rimLight) rimLight.intensity = rimLightIntensity;
-	$: if (scene && environmentIntensity !== undefined) scene.environmentIntensity = environmentIntensity;
+	$: if (scene) scene.environmentIntensity = 0.6; // Fixed environment intensity
 	$: if (renderer && toneMappingExposure !== undefined) renderer.toneMappingExposure = toneMappingExposure;
 
 	function initScene() {
@@ -221,7 +221,7 @@
 		const roomEnv = new RoomEnvironment();
 		const envTexture = pmremGenerator.fromScene(roomEnv).texture;
 		scene.environment = envTexture;
-		scene.environmentIntensity = environmentIntensity;
+		scene.environmentIntensity = 0.6; // Fixed environment intensity
 		roomEnv.dispose();
 
 		// Lighting

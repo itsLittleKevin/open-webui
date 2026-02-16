@@ -80,7 +80,7 @@
 	// Local settings state (bound to controls, synced to store on change)
 	let vrmBgTransparency = 20;
 	let vrmBgColor = '#000000';
-	let vrmBgBlur = 0;
+	let vrmBgBlur = 0;  // Simple blur for when gradient is disabled
 	let vrmChromaKeyEnabled = true;
 	let vrmChromaKeyColor = '#00FF00';
 	let vrmChromaKeyTolerance = 100;
@@ -109,7 +109,21 @@
 	let vrmBgGradientMidOpacity = 50;
 	let vrmBgGradientEndOpacity = 100;
 	let vrmBgGradientMidpoint = 50;
-
+	
+	// Blur gradient settings (0-20px) - mirrored from opacity gradient
+	let vrmBgGradientBlurAngle = 180;
+	let vrmBgGradientStartBlur = 0;
+	let vrmBgGradientMidBlur = 5;
+	let vrmBgGradientEndBlur = 0;
+	let vrmBgGradientBlurMidpoint = 50;
+	
+	// Collapsible section states
+	let expandGradient = true;
+	let expandChromaKey = true;
+	let expandLayers = true;
+	let expandLighting = true;
+	let expandBackdropBlur = false;  // Simple blur section (hidden by default when gradient available)
+	
 	// ── Mode Toggle: Camera (VSeeFace) vs Native (Browser VRM) ──────────
 	let vrmRenderMode: 'camera' | 'native' = 'camera';
 	let vrmNativeFile: File | null = null;
@@ -125,7 +139,7 @@
 	let nativeMainLightIntensity = 1.0;
 	let nativeAmbientLightIntensity = 0.4;
 	let nativeRimLightIntensity = 0.5;
-	let nativeEnvironmentIntensity = 0.6;
+	let nativeGammaCorrection = 1.0;
 	let nativeToneMappingExposure = 1.0;
 	let nativeContrast = 1.0;
 	let nativeSaturation = 1.0;
@@ -334,12 +348,18 @@
 		vrmBgGradientMidOpacity = $settings?.vrmBgGradientMidOpacity ?? 50;
 		vrmBgGradientEndOpacity = $settings?.vrmBgGradientEndOpacity ?? 100;
 		vrmBgGradientMidpoint = $settings?.vrmBgGradientMidpoint ?? 50;
+		vrmBgBlur = $settings?.vrmBgBlur ?? 0;
+		vrmBgGradientBlurAngle = $settings?.vrmBgGradientBlurAngle ?? 180;
+		vrmBgGradientStartBlur = $settings?.vrmBgGradientStartBlur ?? 0;
+		vrmBgGradientMidBlur = $settings?.vrmBgGradientMidBlur ?? 5;
+		vrmBgGradientEndBlur = $settings?.vrmBgGradientEndBlur ?? 0;
+		vrmBgGradientBlurMidpoint = $settings?.vrmBgGradientBlurMidpoint ?? 50;
 		vrmRenderMode = $settings?.vrmRenderMode ?? 'camera';
 		nativeFocalLength = $settings?.nativeFocalLength ?? 135;
 		nativeMainLightIntensity = $settings?.nativeMainLightIntensity ?? 1.0;
 		nativeAmbientLightIntensity = $settings?.nativeAmbientLightIntensity ?? 0.4;
 		nativeRimLightIntensity = $settings?.nativeRimLightIntensity ?? 0.5;
-		nativeEnvironmentIntensity = $settings?.nativeEnvironmentIntensity ?? 0.6;
+		nativeGammaCorrection = $settings?.nativeGammaCorrection ?? 1.0;
 		nativeToneMappingExposure = $settings?.nativeToneMappingExposure ?? 1.0;
 		nativeContrast = $settings?.nativeContrast ?? 1.0;
 		nativeSaturation = $settings?.nativeSaturation ?? 1.0;
@@ -821,10 +841,42 @@
 		return `rgba(${r}, ${g}, ${b}, ${a})`;
 	}
 
+	// Interpolate blur value based on gradient midpoint (0-100), similar to opacity
+	function getGradientBlur(): number {
+		const midBias = vrmBgGradientBlurMidpoint / 100; // 0-1
+		if (midBias <= 0.5) {
+			// Interpolate between start and mid
+			const t = midBias * 2; // 0-1
+			return vrmBgGradientStartBlur + (vrmBgGradientMidBlur - vrmBgGradientStartBlur) * t;
+		} else {
+			// Interpolate between mid and end
+			const t = (midBias - 0.5) * 2; // 0-1
+			return vrmBgGradientMidBlur + (vrmBgGradientEndBlur - vrmBgGradientMidBlur) * t;
+		}
+	}
+
 	$: overlayBg = vrmBgGradientEnabled
 		? `linear-gradient(${vrmBgGradientAngle}deg, ${hexToRgba(vrmBgColor, vrmBgGradientStartOpacity)} 0%, ${hexToRgba(vrmBgColor, vrmBgGradientMidOpacity)} ${vrmBgGradientMidpoint}%, ${hexToRgba(vrmBgColor, vrmBgGradientEndOpacity)} 100%)`
 		: hexToRgba(vrmBgColor, 100 - vrmBgTransparency);
-	$: overlayBackdrop = vrmBgBlur > 0 ? `blur(${vrmBgBlur}px)` : 'none';
+	
+	// Compute blur amount and gradient mask for the blur overlay
+	$: overlayBlurAmount = (() => {
+		if (vrmBgGradientEnabled) {
+			return Math.max(vrmBgGradientStartBlur, vrmBgGradientMidBlur, vrmBgGradientEndBlur);
+		} else {
+			return vrmBgBlur;
+		}
+	})();
+
+	$: overlayBlurMask = (() => {
+		if (vrmBgGradientEnabled && overlayBlurAmount > 0) {
+			const startA = vrmBgGradientStartBlur / overlayBlurAmount;
+			const midA = vrmBgGradientMidBlur / overlayBlurAmount;
+			const endA = vrmBgGradientEndBlur / overlayBlurAmount;
+			return `linear-gradient(${vrmBgGradientBlurAngle}deg, rgba(0,0,0,${startA}) 0%, rgba(0,0,0,${midA}) ${vrmBgGradientBlurMidpoint}%, rgba(0,0,0,${endA}) 100%)`;
+		}
+		return 'none';
+	})();
 	$: titleBarHeight = showFrame ? 30 : 0;
 
 	// ── WebGL chroma key shader ──────────────────────────────────────────
@@ -1293,11 +1345,20 @@
 		class="fixed z-50 overflow-hidden shadow-2xl select-none"
 		class:rounded-2xl={showFrame}
 		class:rounded-xl={!showFrame}
-		style="left: {pos.x}px; top: {pos.y}px; width: {overlayWidth}px; height: {overlayHeight}px; background: {overlayBg}; backdrop-filter: {overlayBackdrop}; border: {showFrame ? '1px solid rgba(128,128,128,0.3)' : 'none'};"
+		style="left: {pos.x}px; top: {pos.y}px; width: {overlayWidth}px; height: {overlayHeight}px; background: {overlayBg}; border: {showFrame ? '1px solid rgba(128,128,128,0.3)' : 'none'};"
 		on:mousedown={onMouseDown}
 		on:mouseenter={() => { showFrame = true; }}
 		on:mouseleave={() => { if (!showDevicePicker) showFrame = false; }}
 	>
+		<!-- Blur overlay layer (gradient blur via mask) -->
+		{#if overlayBlurAmount > 0}
+		<div
+			class="absolute inset-0 pointer-events-none"
+			style="backdrop-filter: blur({overlayBlurAmount}px); -webkit-backdrop-filter: blur({overlayBlurAmount}px);
+				{overlayBlurMask !== 'none' ? `mask-image: ${overlayBlurMask}; -webkit-mask-image: ${overlayBlurMask};` : ''}
+				z-index: 0;"
+		></div>
+		{/if}
 		<!-- Title bar (overlay, conditionally visible) -->
 		{#if showFrame}
 		<div
@@ -1453,7 +1514,7 @@
 					mainLightIntensity={nativeMainLightIntensity}
 					ambientLightIntensity={nativeAmbientLightIntensity}
 					rimLightIntensity={nativeRimLightIntensity}
-					environmentIntensity={nativeEnvironmentIntensity}
+					gammaCorrection={nativeGammaCorrection}
 					toneMappingExposure={nativeToneMappingExposure}
 					contrast={nativeContrast}
 					saturation={nativeSaturation}
@@ -1802,7 +1863,11 @@
 					</div>
 
 					<!-- Shader / Lighting -->
-					<div class="text-xs font-medium mt-2">{$i18n.t('Lighting')}</div>
+					<div class="flex w-full justify-between items-center cursor-pointer hover:bg-gray-700/20 rounded px-1" on:click={() => expandLighting = !expandLighting}>
+						<div class="text-xs font-medium">{$i18n.t('Lighting')}</div>
+						<span class="text-xs text-gray-400">{expandLighting ? '▼' : '▶'}</span>
+					</div>
+					{#if expandLighting}
 					<div class="text-[10px] text-gray-500">{$i18n.t('Adjust VRM shader and lighting settings')}</div>
 					
 					<!-- Main Light -->
@@ -1832,13 +1897,13 @@
 						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeRimLightIntensity * 100} on:input={(e) => { nativeRimLightIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeRimLightIntensity })} />
 					</div>
 					
-					<!-- Environment Reflections -->
+					<!-- Gamma Correction -->
 					<div>
 						<div class="flex w-full justify-between items-center">
-							<div class="text-xs">{$i18n.t('Environment')}</div>
-							<span class="text-xs text-gray-400 w-12 text-right">{(nativeEnvironmentIntensity * 100).toFixed(0)}%</span>
+							<div class="text-xs">{$i18n.t('Gamma Correction')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{(nativeGammaCorrection * 100).toFixed(0)}%</span>
 						</div>
-						<input type="range" min="0" max="200" step="5" class="w-full mt-0.5" value={nativeEnvironmentIntensity * 100} on:input={(e) => { nativeEnvironmentIntensity = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeEnvironmentIntensity })} />
+						<input type="range" min="50" max="200" step="5" class="w-full mt-0.5" value={nativeGammaCorrection * 100} on:input={(e) => { nativeGammaCorrection = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeGammaCorrection })} />
 					</div>
 					
 					<!-- Exposure -->
@@ -1911,6 +1976,7 @@
 							<div class="w-8 h-4 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-cyan-600"></div>
 						</label>
 					</div>
+					{/if}
 
 					<!-- Camera Controls -->
 					<div class="text-xs font-medium mt-1">{$i18n.t('Camera Controls')}</div>
@@ -2029,6 +2095,17 @@
 				</div>
 				{/if}
 
+				<!-- Background Blur (simple, when gradient disabled) -->
+				{#if !vrmBgGradientEnabled}
+				<div>
+					<div class="flex w-full justify-between items-center">
+						<div class="text-xs">{$i18n.t('Background Blur')}</div>
+						<span class="text-xs text-gray-400 w-10 text-right">{vrmBgBlur}px</span>
+					</div>
+					<input type="range" min="0" max="20" step="1" class="w-full mt-0.5" bind:value={vrmBgBlur} on:change={() => saveSettings({ vrmBgBlur })} />
+				</div>
+				{/if}
+
 				<!-- Gradient Toggle -->
 				<div class="flex w-full justify-between items-center">
 					<div class="text-xs">{$i18n.t('Gradient Transparency')}</div>
@@ -2037,6 +2114,11 @@
 
 				<!-- Gradient Controls -->
 				{#if vrmBgGradientEnabled}
+				<div class="flex w-full justify-between items-center cursor-pointer hover:bg-gray-700/20 rounded px-1" on:click={() => expandGradient = !expandGradient}>
+					<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide">{$i18n.t('Gradient Controls')}</div>
+					<span class="text-xs text-gray-400">{expandGradient ? '▼' : '▶'}</span>
+				</div>
+				{#if expandGradient}
 				<div class="pl-2 border-l-2 border-gray-700 flex flex-col gap-1.5">
 					<div>
 						<div class="flex w-full justify-between items-center">
@@ -2073,21 +2155,57 @@
 						</div>
 						<input type="range" min="0" max="100" step="1" class="w-full mt-0.5" bind:value={vrmBgGradientMidpoint} on:change={() => saveSettings({ vrmBgGradientMidpoint })} />
 					</div>
+
+					<!-- Gradient Blur Controls - mirrored from opacity -->
+					<div class="mt-2 pt-2 border-t border-gray-700">
+						<div class="text-xs text-gray-400 mb-1">Blur Gradient </div>
+						<div>
+							<div class="flex w-full justify-between items-center">
+								<div class="text-xs">{$i18n.t('Blur Angle')}</div>
+								<span class="text-xs text-gray-400 w-10 text-right">{vrmBgGradientBlurAngle}°</span>
+							</div>
+							<input type="range" min="0" max="360" step="1" class="w-full mt-0.5" bind:value={vrmBgGradientBlurAngle} on:change={() => saveSettings({ vrmBgGradientBlurAngle })} />
+						</div>
+						<div>
+							<div class="flex w-full justify-between items-center">
+								<div class="text-xs">{$i18n.t('Start Blur')}</div>
+								<span class="text-xs text-gray-400 w-10 text-right">{vrmBgGradientStartBlur}px</span>
+							</div>
+							<input type="range" min="0" max="20" step="0.5" class="w-full mt-0.5" bind:value={vrmBgGradientStartBlur} on:change={() => saveSettings({ vrmBgGradientStartBlur })} />
+						</div>
+						<div>
+							<div class="flex w-full justify-between items-center">
+								<div class="text-xs">{$i18n.t('Mid Blur')}</div>
+								<span class="text-xs text-gray-400 w-10 text-right">{vrmBgGradientMidBlur}px</span>
+							</div>
+							<input type="range" min="0" max="20" step="0.5" class="w-full mt-0.5" bind:value={vrmBgGradientMidBlur} on:change={() => saveSettings({ vrmBgGradientMidBlur })} />
+						</div>
+						<div>
+							<div class="flex w-full justify-between items-center">
+								<div class="text-xs">{$i18n.t('End Blur')}</div>
+								<span class="text-xs text-gray-400 w-10 text-right">{vrmBgGradientEndBlur}px</span>
+							</div>
+							<input type="range" min="0" max="20" step="0.5" class="w-full mt-0.5" bind:value={vrmBgGradientEndBlur} on:change={() => saveSettings({ vrmBgGradientEndBlur })} />
+						</div>
+						<div>
+							<div class="flex w-full justify-between items-center">
+								<div class="text-xs">{$i18n.t('Blur Midpoint')}</div>
+								<span class="text-xs text-gray-400 w-10 text-right">{vrmBgGradientBlurMidpoint}%</span>
+							</div>
+							<input type="range" min="0" max="100" step="1" class="w-full mt-0.5" bind:value={vrmBgGradientBlurMidpoint} on:change={() => saveSettings({ vrmBgGradientBlurMidpoint })} />
+						</div>
+					</div>
 				</div>
 				{/if}
-
-				<!-- Background Blur -->
-				<div>
-					<div class="flex w-full justify-between items-center">
-						<div class="text-xs">{$i18n.t('Background Blur')}</div>
-						<span class="text-xs text-gray-400 w-10 text-right">{vrmBgBlur}px</span>
-					</div>
-					<input type="range" min="0" max="20" step="1" class="w-full mt-1" bind:value={vrmBgBlur} on:change={() => saveSettings({ vrmBgBlur })} />
-				</div>
+				{/if}
 
 				<!-- Chroma Key section (only for camera mode) -->
 				{#if vrmRenderMode === 'camera'}
-				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-1">{$i18n.t('Chroma Key')}</div>
+				<div class="flex w-full justify-between items-center cursor-pointer hover:bg-gray-700/20 rounded px-1" on:click={() => expandChromaKey = !expandChromaKey}>
+					<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide">{$i18n.t('Chroma Key')}</div>
+					<span class="text-xs text-gray-400">{expandChromaKey ? '▼' : '▶'}</span>
+				</div>
+				{#if expandChromaKey}
 
 				<!-- Chroma Key Toggle -->
 				<div class="flex w-full justify-between items-center">
@@ -2121,8 +2239,14 @@
 				</div>
 				{/if}
 				{/if}
+				{/if}
 
-				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-1">{$i18n.t('Layers')}</div>
+				<!-- Layers Section -->
+				<div class="flex w-full justify-between items-center cursor-pointer hover:bg-gray-700/20 rounded px-1" on:click={() => expandLayers = !expandLayers}>
+					<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide">{$i18n.t('Layers')}</div>
+					<span class="text-xs text-gray-400">{expandLayers ? '▼' : '▶'}</span>
+				</div>
+				{#if expandLayers}
 
 				<!-- Back Layers -->
 				<div>
@@ -2165,6 +2289,7 @@
 						</div>
 					</div>
 				</div>
+				{/if}
 
 				<!-- ── VMC Animations ────────────────────────────────── -->
 				<div class="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-2 mb-1">{$i18n.t('VMC Animations')}</div>

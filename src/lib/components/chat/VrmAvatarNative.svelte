@@ -40,7 +40,7 @@
 	export let mainLightIntensity = 1.0;
 	export let ambientLightIntensity = 0.4;
 	export let rimLightIntensity = 0.5;
-	export let environmentIntensity = 0.6;
+	export let gammaCorrection = 1.0;
 	export let toneMappingExposure = 1.0;
 	export let contrast = 1.0;
 	export let saturation = 1.0;
@@ -652,7 +652,7 @@
 		{mainLightIntensity}
 		{ambientLightIntensity}
 		{rimLightIntensity}
-		{environmentIntensity}
+		{gammaCorrection}
 		{toneMappingExposure}
 		{contrast}
 		{saturation}
