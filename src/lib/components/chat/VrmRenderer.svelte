@@ -35,8 +35,8 @@
 	export let rimFresnelPower = 3.0;
 	export let rimLift = 0.3;
 	
-	// Rest pose - arms down instead of T-pose
-	export let restPose = true;
+	// Rest pose - arms down strength (0 = T-pose, 100 = full arms-down)
+	export let restPose: number = 100;
 	
 	// Focal length (mm) - simulates camera lens, 70-240mm range
 	// Higher values = more telephoto/compressed look (like VSeeFace 135mm)
@@ -184,6 +184,7 @@
 	$: if (rimLight) rimLight.intensity = rimLightIntensity;
 	$: if (scene) scene.environmentIntensity = 0.6; // Fixed environment intensity
 	$: if (renderer && toneMappingExposure !== undefined) renderer.toneMappingExposure = toneMappingExposure;
+	$: if (renderer && gammaCorrection !== undefined) renderer.toneMappingExposure = gammaCorrection;
 
 	function initScene() {
 		if (!canvasEl) return;
@@ -407,44 +408,22 @@
 		const leftHand = vrm.humanoid.getNormalizedBoneNode('leftHand');
 		const rightHand = vrm.humanoid.getNormalizedBoneNode('rightHand');
 		
-		if (restPose) {
-			// Rotate upper arms down (~70 degrees)
-			// Left arm rotates positively around Z, right arm negatively
-			if (leftUpperArm) {
-				leftUpperArm.rotation.set(0, 0, 1.2); // ~70 degrees down
-			}
-			if (rightUpperArm) {
-				rightUpperArm.rotation.set(0, 0, -1.2);
-			}
-			
-			// Slight elbow bend for natural look
-			if (leftLowerArm) {
-				leftLowerArm.rotation.set(0, 0, 0.15);
-			}
-			if (rightLowerArm) {
-				rightLowerArm.rotation.set(0, 0, -0.15);
-			}
-			
-			// Natural hand rotation
-			if (leftHand) {
-				leftHand.rotation.set(0, 0, 0.1);
-			}
-			if (rightHand) {
-				rightHand.rotation.set(0, 0, -0.1);
-			}
-		} else {
-			// Reset to T-pose
-			if (leftUpperArm) leftUpperArm.rotation.set(0, 0, 0);
-			if (rightUpperArm) rightUpperArm.rotation.set(0, 0, 0);
-			if (leftLowerArm) leftLowerArm.rotation.set(0, 0, 0);
-			if (rightLowerArm) rightLowerArm.rotation.set(0, 0, 0);
-			if (leftHand) leftHand.rotation.set(0, 0, 0);
-			if (rightHand) rightHand.rotation.set(0, 0, 0);
-		}
+		const t = Math.max(0, Math.min(100, restPose)) / 100; // 0-1 strength
+		
+		// Upper arms: 0 = T-pose (0 rad), 1 = full down (1.5708 rad, 90°)
+		if (leftUpperArm) leftUpperArm.rotation.set(0, 0, 1.5708 * t);
+		if (rightUpperArm) rightUpperArm.rotation.set(0, 0, -1.5708 * t);
+		
+		// Elbow bend: slight natural bend at full strength
+		if (leftLowerArm) leftLowerArm.rotation.set(0, 0, 0.15 * t);
+		if (rightLowerArm) rightLowerArm.rotation.set(0, 0, -0.15 * t);
+		
+		// Hand rotation
+		if (leftHand) leftHand.rotation.set(0, 0, 0.1 * t);
+		if (rightHand) rightHand.rotation.set(0, 0, -0.1 * t);
 	}
 	
 	// Reactive update for rest pose
-	$: if (vrm) applyRestPose();
 	$: if (vrm && restPose !== undefined) applyRestPose();
 
 	// ── Mouse Event Handlers ───────────────────────────────────────────

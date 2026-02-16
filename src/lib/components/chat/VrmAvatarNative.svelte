@@ -50,8 +50,8 @@
 	export let rimFresnelPower = 3.0;
 	export let rimLift = 0.3;
 	
-	// Rest pose - arms down instead of T-pose
-	export let restPose = true;
+	// Rest pose - arms down strength (0 = T-pose, 100 = full arms-down)
+	export let restPose: number = 100;
 
 	// State
 	let vrmRef: VrmRenderer;

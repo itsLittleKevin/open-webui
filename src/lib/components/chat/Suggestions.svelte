@@ -76,7 +76,7 @@
 				? ' -mt-1'
 				: 'text-center items-center justify-center'}  self-start text-gray-600 dark:text-gray-400 gap-2"
 		>
-			<div>Powered By {$WEBUI_NAME} ‧ v{WEBUI_VERSION} Modified</div>
+			<div>Built by <a href="https://i12n.io">i12n.io</a> ‧ v{WEBUI_VERSION}</div>
 			<div>LLMs could make mistakes</div>
 		</div>
 	{/if}

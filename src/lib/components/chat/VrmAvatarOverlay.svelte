@@ -150,7 +150,7 @@
 	let nativeRimLift = 0.3;
 	
 	// Rest pose - arms down instead of T-pose
-	let nativeRestPose = true;
+	let nativeRestPose = 70; // 0 = T-pose, 100 = full arms-down
 
 	// Lip sync integration with global TTS audioElement
 	let ttsAudioElement: HTMLAudioElement | null = null;
@@ -366,7 +366,7 @@
 		nativeMatcapIntensity = $settings?.nativeMatcapIntensity ?? 0.5;
 		nativeRimFresnelPower = $settings?.nativeRimFresnelPower ?? 3.0;
 		nativeRimLift = $settings?.nativeRimLift ?? 0.3;
-		nativeRestPose = $settings?.nativeRestPose ?? true;
+		nativeRestPose = $settings?.nativeRestPose ?? 70;
 	}
 
 	// ── Native VRM Functions ─────────────────────────────────────────────
@@ -1963,18 +1963,13 @@
 						<input type="range" min="0" max="100" step="5" class="w-full mt-0.5" value={nativeRimLift * 100} on:input={(e) => { nativeRimLift = parseInt(e.currentTarget.value) / 100; }} on:change={() => saveSettings({ nativeRimLift })} />
 					</div>
 					
-					<!-- Rest Pose Toggle -->
-					<div class="flex items-center justify-between mt-1">
-						<div class="text-xs">{$i18n.t('Rest Pose (Arms Down)')}</div>
-						<label class="relative inline-flex items-center cursor-pointer">
-							<input
-								type="checkbox"
-								class="sr-only peer"
-								bind:checked={nativeRestPose}
-								on:change={() => saveSettings({ nativeRestPose })}
-							/>
-							<div class="w-8 h-4 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-cyan-600"></div>
-						</label>
+					<!-- Rest Pose (Arms Down) -->
+					<div>
+						<div class="flex w-full justify-between items-center">
+							<div class="text-xs">{$i18n.t('Arms Down')}</div>
+							<span class="text-xs text-gray-400 w-12 text-right">{nativeRestPose}%</span>
+						</div>
+						<input type="range" min="0" max="100" step="5" class="w-full mt-0.5" bind:value={nativeRestPose} on:change={() => saveSettings({ nativeRestPose })} />
 					</div>
 					{/if}
 
