@@ -30,7 +30,8 @@
 		saveCameraPreset, loadCameraPreset, deleteCameraPreset, listCameraPresets, 
 		getLastCameraPreset, saveLastCameraPreset, generatePresetId, type CameraPreset,
 		saveAnimationPreset, loadAnimationPreset, deleteAnimationPreset, listAnimationPresets,
-		generateAnimationId, type AnimationPreset
+		generateAnimationId, type AnimationPreset,
+		exportAnimationPresets, importAnimationPresets
 	} from '$lib/utils/vrmStorage';
 
 	import type { Writable } from 'svelte/store';
@@ -129,6 +130,7 @@
 	let vrmNativeFile: File | null = null;
 	let vrmNativeRef: VrmAvatarNative | null = null;
 	let vrmFileInput: HTMLInputElement;
+	let animImportInput: HTMLInputElement;
 	let nativeRecording = false;
 	let nativeRecordName = '';
 	let nativeFaceTracking = false;
@@ -1843,6 +1845,52 @@
 							{$i18n.t('Import All VMC Presets')} ({vmcPresets.length})
 						</button>
 					{/if}
+
+					<!-- Export/Import Animation Presets (for transferring between machines) -->
+					<div class="text-xs font-medium mt-2">{$i18n.t('Transfer Animations')}</div>
+					<div class="text-[10px] text-gray-500">{$i18n.t('Export/import animation presets as JSON files')}</div>
+					<div class="flex gap-1.5">
+						<button
+							type="button"
+							class="flex-1 text-xs px-2 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1"
+							on:click={() => exportAnimationPresets()}
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+								<path d="M8.75 2.75a.75.75 0 0 0-1.5 0v5.69L5.03 6.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 8.44V2.75Z" />
+								<path d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z" />
+							</svg>
+							{$i18n.t('Export')}
+						</button>
+						<button
+							type="button"
+							class="flex-1 text-xs px-2 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-1"
+							on:click={() => { animImportInput?.click(); }}
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5">
+								<path d="M7.25 10.25a.75.75 0 0 0 1.5 0V4.56l2.22 2.22a.75.75 0 1 0 1.06-1.06l-3.5-3.5a.75.75 0 0 0-1.06 0l-3.5 3.5a.75.75 0 0 0 1.06 1.06l2.22-2.22v5.69Z" />
+								<path d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z" />
+							</svg>
+							{$i18n.t('Import')}
+						</button>
+					</div>
+					<input
+						bind:this={animImportInput}
+						type="file"
+						accept=".json"
+						class="hidden"
+						on:change={async (e) => {
+							const file = e.currentTarget.files?.[0];
+							if (!file) return;
+							try {
+								const count = await importAnimationPresets(file);
+								await loadAnimationPresetsForVRM();
+								console.log(`Imported ${count} animation presets`);
+							} catch (err) {
+								console.error('Failed to import animations:', err);
+							}
+							e.currentTarget.value = '';
+						}}
+					/>
 
 					<!-- Focal Length / FOV -->
 					<div class="text-xs font-medium mt-1">{$i18n.t('Focal Length')}</div>

@@ -289,3 +289,57 @@ export async function listAnimationPresets(vrmName?: string): Promise<AnimationP
 export function generateAnimationId(): string {
 	return `anim:${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
+
+// ── Animation Export/Import ────────────────────────────────────────────────
+
+/**
+ * Export all animation presets as a JSON file download
+ */
+export async function exportAnimationPresets(vrmName?: string): Promise<void> {
+	const presets = await listAnimationPresets(vrmName);
+	if (presets.length === 0) return;
+
+	const exportData = {
+		version: 1,
+		exportedAt: new Date().toISOString(),
+		presets
+	};
+
+	const json = JSON.stringify(exportData, null, 2);
+	const blob = new Blob([json], { type: 'application/json' });
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = `vrm-animations-${vrmName || 'all'}-${Date.now()}.json`;
+	a.click();
+	URL.revokeObjectURL(url);
+}
+
+/**
+ * Import animation presets from a JSON file.
+ * Returns the number of presets imported.
+ */
+export async function importAnimationPresets(file: File): Promise<number> {
+	const text = await file.text();
+	const data = JSON.parse(text);
+
+	if (!data.presets || !Array.isArray(data.presets)) {
+		throw new Error('Invalid animation preset file');
+	}
+
+	let count = 0;
+	for (const preset of data.presets) {
+		if (preset.id && preset.name && preset.frames && preset.duration != null && preset.fps != null) {
+			await saveAnimationPreset({
+				id: preset.id,
+				name: preset.name,
+				vrmName: preset.vrmName || '',
+				frames: preset.frames,
+				duration: preset.duration,
+				fps: preset.fps
+			});
+			count++;
+		}
+	}
+	return count;
+}
